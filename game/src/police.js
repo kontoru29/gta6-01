@@ -1,60 +1,31 @@
-// police.js — Solmar Bay wanted level and police pursuit system.
+// police.js — the Marisol Bay police department: wanted level, pursuit,
+// arrests and the "wasted" end of a chase.
 //
-// Owns the 0-to-5-star wanted level for Leo Marlow: crimes raise it, time spent
-// out of sight of every officer lowers it again. Spawns police cars and on-foot
-// officers in numbers that grow with the wanted level, drives them after the
-// player along the city roads, rams the player's car, and ends the run as
-// "busted" (an officer reaches Leo on foot) or "wasted" (Leo's health or his
-// car reaches zero). Police always arrive from the roads around the player —
-// never teleported on top of him — and give up after a long clean escape.
+// One system owns everything about the law in Solmar Bay. Crimes feed a
+// heat number (0-100); every 20 heat is one wanted star, up to five. The
+// star count decides how many patrol cars and foot officers hunt Leo:
+// more stars means more units, faster cars and less patience. Heat cools
+// down only while Leo is out of sight for a while, so a chase ends by
+// breaking line of sight and staying away, not by waiting it out in the
+// open. Officers on foot can arrest Leo (busted); a wrecked car or zero
+// health ends the run (wasted).
 //
-// PUBLIC API — createPoliceSystem(options) returns:
-//   getWantedLevel()            -> integer 0..5 (current stars)
-//   getHeat()                   -> raw heat 0..100 behind the stars
-//   isWanted()                  -> true while stars > 0
-//   reportCrime(type, details)  -> raise heat for a crime; type is one of
-//                                  'assault' | 'shooting' | 'carTheft' |
-//                                  'killPedestrian' | 'killPolice' |
-//                                  'hitAndRun' | 'speeding'
-//   setWantedLevel(stars)       -> scripted set, used by missions (e.g. a
-//                                  robbery mission sets 4 stars); clamps 0..5
-//   addHeat(amount)             -> raw heat bump, for unusual scripted crimes
-//   clearWanted()               -> drop to 0 stars and stand the police down
-//   update(dt, context)         -> advance pursuit/decay one frame; context is
-//                                  { playerPosition, playerInCar, playerHealth,
-//                                    playerCarHealth, playerCar, roadNetwork,
-//                                    policeStation }; returns an events object
-//                                  { wantedChanged, busted, wasted, wastedReason,
-//                                    spawned, despawned, rammed }
-//   getUnits()                  -> live police units (cars + officers) for the
-//                                  HUD minimap and for combat targeting
-//   getBlips()                  -> [{ x, z, kind }] minimap positions
-//   damageUnit(unit, amount)    -> hurt one police unit; returns true if it died
-//   spawnAt(position, kind)     -> force one unit at a spot (shot staging)
-//   reset()                     -> clear every unit and drop to 0 stars
-//   dispose()                   -> remove all meshes from the scene
-//   sirenActive                 -> getter: true while any unit is chasing
-//   units                       -> getter: the live unit array (read-only use)
-//
-// Options: { scene, policeStation, onWantedChanged(level), onBusted(),
-//            onWasted(reason), onRam(amount), random }
-// The caller passes the player's position and health into update() every
-// frame; the caller owns the player and the car, this module only reads them.
-// Road network (optional): { nearestRoadPoint(pos), randomRoadPointNear(pos,
-// minRadius, maxRadius) }. Without one, police chase on a plain 40 m road
-// grid snapped from the player's position, which still reads as road pursuit.
+// The system is created once by main.js and driven every frame through
+// update(dt, context). It never touches the HUD, the missions or the save
+// file directly — it reports through the callbacks it was given
+// (onWantedChanged, onBusted, onWasted, onRam) and through the small
+// read-outs getWantedLevel(), getUnits() and getBlips().
+
 import * as THREE from 'three';
 
 // ---------------------------------------------------------------------------
-// Tuning — every number lives here so the integrator can retune in one place.
+// Public constants: the wanted scale and what each crime is worth.
 // ---------------------------------------------------------------------------
 
 export const MAX_WANTED = 5;
-const HEAT_PER_STAR = 20;
-const MAX_HEAT = MAX_WANTED * HEAT_PER_STAR;
 
-// Heat added by each crime. Killing a police officer is the heaviest crime;
-// a single punch is the lightest. Missions call setWantedLevel() instead.
+// Heat added by each kind of crime. A punch is a slap on the wrist; killing
+// an officer is the fastest way to five stars.
 export const CRIME_HEAT = {
   assault: 8,
   shooting: 12,
@@ -65,543 +36,626 @@ export const CRIME_HEAT = {
   killPolice: 40,
 };
 
-// How many units of each kind chase at each wanted level (index = stars).
-const POLICE_CARS_PER_STAR = [0, 1, 2, 3, 4, 5];
+// ---------------------------------------------------------------------------
+// Tuning: everything that shapes how a chase feels, in one place.
+// ---------------------------------------------------------------------------
+
+const HEAT_PER_STAR = 20;
+const MAX_HEAT = MAX_WANTED * HEAT_PER_STAR;
+
+// Units on the street at each star count (index = stars).
+const PATROL_CARS_PER_STAR = [0, 1, 2, 3, 4, 5];
 const OFFICERS_PER_STAR = [0, 0, 1, 1, 2, 3];
 
-const DECAY_GRACE_SECONDS = 8; // no decay right after a crime
-const DECAY_RATE_PER_SECOND = 3.0; // heat lost per second while hidden
-const HIDDEN_DISTANCE = 60; // farther than this from every unit = hidden
-const GIVE_UP_SECONDS = 22; // unseen this long -> heat drains twice as fast
-const SPAWN_MIN_DISTANCE = 65; // never spawn closer than this to the player
-const SPAWN_MAX_DISTANCE = 130; // never spawn farther than this
-const DESPAWN_DISTANCE = 170; // standing-down units vanish past this range
-const BUST_RANGE = 2.4; // officer this close starts the arrest
-const BUST_HOLD_SECONDS = 1.0; // must stay in range this long to be busted
-const RAM_RANGE = 5.0; // police car this close to the player's car rams it
-const RAM_DAMAGE = 9; // health lost by the player's car per ram
-const RAM_COOLDOWN = 1.6; // seconds between rams from the same car
-const OFFICER_RUN_SPEED = 5.4; // m/s — faster than walking, slower than sprinting
-const OFFICER_HEALTH = 60;
-const POLICE_CAR_HEALTH = 120;
-const ROAD_SPACING = 40; // fallback grid spacing when no road network given
-const CITY_HALF_SIZE = 220; // fallback city extent, used to clamp spawns
+// Heat only starts falling this long after the last crime, and only while
+// Leo is hidden from every unit.
+const COOLDOWN_AFTER_CRIME = 8; // seconds
+const HEAT_LOSS_PER_SECOND = 3.0;
+const HIDDEN_RANGE = 60; // farther than this from every unit counts as hidden
+const UNSEEN_GIVE_UP = 22; // unseen this long and heat drains twice as fast
 
-function clamp(value, min, max) {
-  return Math.min(max, Math.max(min, value));
+// Where fresh units appear and disappear.
+const SPAWN_NEAR = 65; // never closer than this to the player
+const SPAWN_FAR = 130; // never farther than this
+const STAND_DOWN_RANGE = 170; // standing-down units vanish past this range
+
+// Arrest and ramming rules.
+const ARREST_RANGE = 2.4; // an officer this close starts the arrest
+const ARREST_HOLD = 1.0; // seconds inside the range before the bust lands
+const RAM_RANGE = 5.0; // a patrol car this close rams the player's car
+const RAM_HIT = 9; // car health lost per ram
+const RAM_PAUSE = 1.6; // seconds between rams from the same car
+
+// Unit bodies.
+const OFFICER_SPEED = 5.4; // metres per second on foot
+const OFFICER_TOUGHNESS = 60; // health of one officer
+const PATROL_TOUGHNESS = 120; // health of one patrol car
+const CAR_TOP_SPEED = 26; // fastest a patrol car drives in a chase
+const CAR_TURN_RATE = 2.4; // radians per second of steering
+
+// Fallbacks used when the caller hands us no road network at all.
+const FALLBACK_ROAD_GAP = 40;
+const CITY_EDGE = 220;
+
+// ---------------------------------------------------------------------------
+// Tiny helpers. Nothing here knows about the game; they are pure maths.
+// ---------------------------------------------------------------------------
+
+function limitNumber(value, low, high) {
+  if (value < low) return low;
+  if (value > high) return high;
+  return value;
 }
 
-function distance2D(a, b) {
-  const dx = a.x - b.x;
-  const dz = a.z - b.z;
+function flatDistance(ax, az, bx, bz) {
+  const dx = ax - bx;
+  const dz = az - bz;
   return Math.sqrt(dx * dx + dz * dz);
 }
 
-// Accept a THREE.Vector3, a { x, y, z } object or a { x, z } object and
-// always answer with a fresh THREE.Vector3 on the ground plane (y = 0).
-function toVector3(value, fallback) {
-  if (!value) return fallback ? fallback.clone() : new THREE.Vector3();
-  if (value.isVector3) return value.clone();
-  return new THREE.Vector3(value.x || 0, value.y || 0, value.z || 0);
-}
-
-function angleTowards(current, target, maxStep) {
-  let diff = target - current;
+// Turn `angle` toward `target` by at most `step` radians, taking the short
+// way around the circle.
+function steerAngle(angle, target, step) {
+  let diff = target - angle;
   while (diff > Math.PI) diff -= Math.PI * 2;
   while (diff < -Math.PI) diff += Math.PI * 2;
-  return current + clamp(diff, -maxStep, maxStep);
+  if (diff > step) return angle + step;
+  if (diff < -step) return angle - step;
+  return target;
 }
 
-// Snap a point onto the nearest fallback-grid road (roads run every
-// ROAD_SPACING metres along both axes through the city centre).
-function snapToFallbackRoad(point) {
-  const snapped = point.clone();
-  const xRoad = Math.round(snapped.x / ROAD_SPACING) * ROAD_SPACING;
-  const zRoad = Math.round(snapped.z / ROAD_SPACING) * ROAD_SPACING;
-  if (Math.abs(snapped.x - xRoad) <= Math.abs(snapped.z - zRoad)) snapped.x = xRoad;
-  else snapped.z = zRoad;
-  snapped.x = clamp(snapped.x, -CITY_HALF_SIZE, CITY_HALF_SIZE);
-  snapped.z = clamp(snapped.z, -CITY_HALF_SIZE, CITY_HALF_SIZE);
-  snapped.y = 0;
-  return snapped;
+// A random point on a ring around (cx, cz), using the caller's rng.
+function ringPoint(rng, cx, cz, near, far) {
+  const angle = rng() * Math.PI * 2;
+  const radius = near + rng() * (far - near);
+  return { x: cx + Math.sin(angle) * radius, z: cz + Math.cos(angle) * radius };
+}
+
+// Snap a point onto the fallback road grid (streets every FALLBACK_ROAD_GAP
+// metres, crossing at the origin) when no real road network is available.
+function snapToGrid(point) {
+  const gap = FALLBACK_ROAD_GAP;
+  const onXRoad = Math.abs(point.z % gap) < Math.abs(point.x % gap);
+  if (onXRoad) {
+    return { x: point.x, z: Math.round(point.z / gap) * gap };
+  }
+  return { x: Math.round(point.x / gap) * gap, z: point.z };
 }
 
 // ---------------------------------------------------------------------------
-// Procedural police meshes — built only from three.js primitives, no assets.
+// Mesh factories: what a patrol car and an officer look like.
 // ---------------------------------------------------------------------------
 
-function buildPoliceCarMesh() {
+// A black-and-white patrol car: dark body, pale doors, a roof light bar
+// whose red and blue halves flash while the car is chasing. The materials
+// for the two halves are returned so update() can flash them.
+function makePatrolCarMesh() {
   const group = new THREE.Group();
-  const bodyMaterial = new THREE.MeshStandardMaterial({ color: 0xf2f4f6, roughness: 0.35, metalness: 0.4 });
-  const darkMaterial = new THREE.MeshStandardMaterial({ color: 0x1b2a4a, roughness: 0.5, metalness: 0.3 });
-  const glassMaterial = new THREE.MeshStandardMaterial({ color: 0x9fc8e8, roughness: 0.1, metalness: 0.6 });
 
-  const body = new THREE.Mesh(new THREE.BoxGeometry(2.0, 0.55, 4.4), bodyMaterial);
+  const paint = new THREE.MeshStandardMaterial({ color: 0x14181f, metalness: 0.55, roughness: 0.4 });
+  const doorPaint = new THREE.MeshStandardMaterial({ color: 0xf2f0e8, metalness: 0.3, roughness: 0.5 });
+  const glass = new THREE.MeshStandardMaterial({ color: 0x1b2a33, metalness: 0.8, roughness: 0.15 });
+  const tyre = new THREE.MeshStandardMaterial({ color: 0x0c0c0c, roughness: 0.9 });
+
+  const body = new THREE.Mesh(new THREE.BoxGeometry(2.0, 0.62, 4.3), paint);
   body.position.y = 0.55;
+  body.castShadow = true;
   group.add(body);
 
-  const cabin = new THREE.Mesh(new THREE.BoxGeometry(1.7, 0.55, 2.2), glassMaterial);
-  cabin.position.set(0, 1.05, -0.2);
+  const cabin = new THREE.Mesh(new THREE.BoxGeometry(1.7, 0.55, 2.2), glass);
+  cabin.position.set(0, 1.12, -0.2);
+  cabin.castShadow = true;
   group.add(cabin);
 
-  const stripe = new THREE.Mesh(new THREE.BoxGeometry(2.02, 0.18, 4.42), darkMaterial);
-  stripe.position.y = 0.62;
-  group.add(stripe);
+  // Pale doors on both flanks, so the car reads as a patrol car from the side.
+  for (const side of [-1, 1]) {
+    const door = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.5, 1.7), doorPaint);
+    door.position.set(side * 1.01, 0.62, 0.1);
+    group.add(door);
+  }
 
-  const wheelGeometry = new THREE.CylinderGeometry(0.36, 0.36, 0.28, 14);
-  const wheelMaterial = new THREE.MeshStandardMaterial({ color: 0x141414, roughness: 0.9 });
-  for (const [x, z] of [[-0.95, 1.45], [0.95, 1.45], [-0.95, -1.45], [0.95, -1.45]]) {
-    const wheel = new THREE.Mesh(wheelGeometry, wheelMaterial);
+  const redLamp = new THREE.MeshStandardMaterial({
+    color: 0xaa1111, emissive: 0xff2020, emissiveIntensity: 0.2,
+  });
+  const blueLamp = new THREE.MeshStandardMaterial({
+    color: 0x1122aa, emissive: 0x2244ff, emissiveIntensity: 0.2,
+  });
+  const barBase = new THREE.Mesh(new THREE.BoxGeometry(1.3, 0.12, 0.4), tyre);
+  barBase.position.set(0, 1.46, -0.2);
+  group.add(barBase);
+  const redHalf = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.14, 0.34), redLamp);
+  redHalf.position.set(-0.32, 1.56, -0.2);
+  group.add(redHalf);
+  const blueHalf = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.14, 0.34), blueLamp);
+  blueHalf.position.set(0.32, 1.56, -0.2);
+  group.add(blueHalf);
+
+  const wheelGeo = new THREE.CylinderGeometry(0.36, 0.36, 0.28, 14);
+  for (const [wx, wz] of [[-0.95, 1.4], [0.95, 1.4], [-0.95, -1.4], [0.95, -1.4]]) {
+    const wheel = new THREE.Mesh(wheelGeo, tyre);
     wheel.rotation.z = Math.PI / 2;
-    wheel.position.set(x, 0.36, z);
+    wheel.position.set(wx, 0.36, wz);
+    wheel.castShadow = true;
     group.add(wheel);
   }
 
-  // Light bar: red on the left, blue on the right; update() flashes them.
-  const redLight = new THREE.Mesh(
-    new THREE.BoxGeometry(0.42, 0.16, 0.3),
-    new THREE.MeshStandardMaterial({ color: 0xff2222, emissive: 0xff0000, emissiveIntensity: 1 }),
-  );
-  redLight.position.set(-0.45, 1.42, -0.2);
-  const blueLight = new THREE.Mesh(
-    new THREE.BoxGeometry(0.42, 0.16, 0.3),
-    new THREE.MeshStandardMaterial({ color: 0x2244ff, emissive: 0x0022ff, emissiveIntensity: 1 }),
-  );
-  blueLight.position.set(0.45, 1.42, -0.2);
-  group.add(redLight, blueLight);
-  group.userData.redLight = redLight;
-  group.userData.blueLight = blueLight;
-
-  const headlightMaterial = new THREE.MeshStandardMaterial({ color: 0xfff6c8, emissive: 0xffee88, emissiveIntensity: 0.7 });
-  for (const x of [-0.6, 0.6]) {
-    const lamp = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.14, 0.08), headlightMaterial);
-    lamp.position.set(x, 0.6, 2.22);
-    group.add(lamp);
-  }
-  return group;
+  return { group, redLamp, blueLamp };
 }
 
-function buildOfficerMesh() {
+// An officer on foot: navy uniform, cap, pale shirt front. Small on purpose
+// — officers are read at a distance by the navy block and the cap.
+function makeOfficerMesh() {
   const group = new THREE.Group();
-  const uniform = new THREE.MeshStandardMaterial({ color: 0x1b2a4a, roughness: 0.7 });
-  const skin = new THREE.MeshStandardMaterial({ color: 0xd9a066, roughness: 0.6 });
-  const vest = new THREE.MeshStandardMaterial({ color: 0x111418, roughness: 0.6 });
 
-  const legs = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.85, 0.3), uniform);
-  legs.position.y = 0.43;
-  group.add(legs);
-  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.7, 0.36), vest);
-  torso.position.y = 1.2;
+  const uniform = new THREE.MeshStandardMaterial({ color: 0x1c2f55, roughness: 0.75 });
+  const shirt = new THREE.MeshStandardMaterial({ color: 0xe8e4d8, roughness: 0.8 });
+  const skin = new THREE.MeshStandardMaterial({ color: 0xc98d64, roughness: 0.7 });
+  const capMat = new THREE.MeshStandardMaterial({ color: 0x101c33, roughness: 0.6 });
+
+  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.72, 0.32), uniform);
+  torso.position.y = 1.08;
+  torso.castShadow = true;
   group.add(torso);
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.24, 14, 12), skin);
-  head.position.y = 1.78;
+
+  const shirtFront = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.5, 0.05), shirt);
+  shirtFront.position.set(0, 1.1, 0.18);
+  group.add(shirtFront);
+
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.21, 12, 10), skin);
+  head.position.y = 1.62;
+  head.castShadow = true;
   group.add(head);
-  const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.26, 0.27, 0.1, 14), uniform);
-  cap.position.y = 1.96;
+
+  const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.23, 0.24, 0.1, 12), capMat);
+  cap.position.y = 1.78;
   group.add(cap);
-  const brim = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.04, 0.22), uniform);
-  brim.position.set(0, 1.92, 0.26);
+  const brim = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.03, 0.22), capMat);
+  brim.position.set(0, 1.74, 0.2);
   group.add(brim);
-  const armGeometry = new THREE.BoxGeometry(0.16, 0.62, 0.16);
-  for (const x of [-0.4, 0.4]) {
-    const arm = new THREE.Mesh(armGeometry, uniform);
-    arm.position.set(x, 1.2, 0);
+
+  for (const side of [-1, 1]) {
+    const leg = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.72, 0.22), uniform);
+    leg.position.set(side * 0.15, 0.36, 0);
+    leg.castShadow = true;
+    group.add(leg);
+    const arm = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.62, 0.16), uniform);
+    arm.position.set(side * 0.36, 1.05, 0);
     group.add(arm);
   }
+
   return group;
 }
 
 // ---------------------------------------------------------------------------
-// The wanted system.
+// The department itself.
 // ---------------------------------------------------------------------------
 
-export function createPoliceSystem(options = {}) {
-  const scene = options.scene || null;
-  const random = options.random || Math.random;
-  const station = toVector3(options.policeStation, new THREE.Vector3(0, 0, -160));
-  const onWantedChanged = options.onWantedChanged || null;
-  const onBusted = options.onBusted || null;
-  const onWasted = options.onWasted || null;
-  const onRam = options.onRam || null;
+let nextUnitId = 1;
 
-  let heat = 0;
-  let stars = 0;
-  let lastCrimeAt = -Infinity;
-  let lastSeenAt = -Infinity;
-  let elapsed = 0;
-  let nextUnitId = 1;
-  let sirenPhase = 0;
-  const units = [];
+class PoliceDepartment {
+  constructor(options) {
+    const opts = options || {};
+    this.scene = opts.scene || null;
+    this.station = opts.policeStation || { x: 0, z: 0 };
+    this.onWantedChanged = typeof opts.onWantedChanged === 'function' ? opts.onWantedChanged : null;
+    this.onBusted = typeof opts.onBusted === 'function' ? opts.onBusted : null;
+    this.onWasted = typeof opts.onWasted === 'function' ? opts.onWasted : null;
+    this.onRam = typeof opts.onRam === 'function' ? opts.onRam : null;
+    this.rng = typeof opts.random === 'function' ? opts.random : Math.random;
 
-  function starsForHeat(value) {
-    if (value <= 0) return 0;
-    return clamp(Math.ceil(value / HEAT_PER_STAR), 1, MAX_WANTED);
+    this.heat = 0;
+    this.stars = 0;
+    this.units = [];
+    this.clock = 0;
+    this.lastCrimeAt = -Infinity;
+    this.lastSeenAt = -Infinity;
+    this.ended = false;
   }
 
-  function announceStarsChanged() {
-    const next = starsForHeat(heat);
-    if (next === stars) return false;
-    stars = next;
-    if (onWantedChanged) onWantedChanged(stars);
-    return true;
+  // --- read-outs -----------------------------------------------------------
+
+  get wantedLevel() {
+    return this.stars;
   }
 
-  function makeUnit(kind, position) {
-    const group = kind === 'car' ? buildPoliceCarMesh() : buildOfficerMesh();
-    group.position.copy(position);
-    group.position.y = 0;
-    if (scene) scene.add(group);
-    const unit = {
-      id: nextUnitId,
-      kind,
-      group,
-      alive: true,
-      health: kind === 'car' ? POLICE_CAR_HEALTH : OFFICER_HEALTH,
-      maxHealth: kind === 'car' ? POLICE_CAR_HEALTH : OFFICER_HEALTH,
-      heading: random() * Math.PI * 2,
-      speed: 0,
-      state: 'chasing',
-      bustTimer: 0,
-      ramCooldown: 0,
-      stuckTimer: 0,
-      leaveTimer: 0,
-      lastPosition: position.clone(),
+  get heatValue() {
+    return this.heat;
+  }
+
+  get sirenActive() {
+    return this.stars > 0 && this.units.some((unit) => unit.mode === 'chasing');
+  }
+
+  get liveUnits() {
+    return this.units;
+  }
+
+  getWantedLevel() {
+    return this.stars;
+  }
+
+  getHeat() {
+    return this.heat;
+  }
+
+  isWanted() {
+    return this.stars > 0;
+  }
+
+  getUnits() {
+    return this.units.filter((unit) => unit.alive);
+  }
+
+  getBlips() {
+    return this.units
+      .filter((unit) => unit.alive)
+      .map((unit) => ({
+        x: unit.group.position.x,
+        z: unit.group.position.z,
+        kind: unit.kind,
+      }));
+  }
+
+  // --- heat and stars ------------------------------------------------------
+
+  // Tell the game the star count moved, and resize the force to match it.
+  publishStars() {
+    const wanted = starsForHeatValue(this.heat);
+    if (wanted === this.stars) return;
+    this.stars = wanted;
+    this.syncForce();
+    if (this.onWantedChanged) this.onWantedChanged(this.stars);
+  }
+
+  reportCrime(type, details) {
+    const heatGain = Object.prototype.hasOwnProperty.call(CRIME_HEAT, type)
+      ? CRIME_HEAT[type]
+      : 10;
+    this.heat = limitNumber(this.heat + heatGain, 0, MAX_HEAT);
+    this.lastCrimeAt = this.clock;
+    const before = this.stars;
+    this.publishStars();
+    return {
+      stars: this.stars,
+      heat: this.heat,
+      changed: this.stars !== before,
+      type,
+      details: details || {},
     };
+  }
+
+  setWantedLevel(level) {
+    const wanted = limitNumber(Math.round(level) || 0, 0, MAX_WANTED);
+    const before = this.stars;
+    this.heat = wanted * HEAT_PER_STAR;
+    this.lastCrimeAt = this.clock;
+    this.publishStars();
+    return { stars: this.stars, heat: this.heat, changed: this.stars !== before };
+  }
+
+  addHeat(amount) {
+    this.heat = limitNumber(this.heat + (amount || 0), 0, MAX_HEAT);
+    this.publishStars();
+    return this.stars;
+  }
+
+  clearWanted() {
+    return this.setWantedLevel(0);
+  }
+
+  // --- units ---------------------------------------------------------------
+
+  // Build one unit object (car or officer) and put its mesh in the scene.
+  buildUnit(kind, spot) {
+    const id = nextUnitId;
     nextUnitId += 1;
-    units.push(unit);
+    if (kind === 'officer') {
+      const group = makeOfficerMesh();
+      group.position.set(spot.x, 0, spot.z);
+      if (this.scene) this.scene.add(group);
+      return {
+        id,
+        kind: 'officer',
+        group,
+        health: OFFICER_TOUGHNESS,
+        maxHealth: OFFICER_TOUGHNESS,
+        alive: true,
+        mode: 'chasing',
+        heading: 0,
+        speed: 0,
+        arrestTimer: 0,
+        lastRamAt: -Infinity,
+        lamps: null,
+      };
+    }
+    const built = makePatrolCarMesh();
+    built.group.position.set(spot.x, 0, spot.z);
+    if (this.scene) this.scene.add(built.group);
+    return {
+      id,
+      kind: 'car',
+      group: built.group,
+      health: PATROL_TOUGHNESS,
+      maxHealth: PATROL_TOUGHNESS,
+      alive: true,
+      mode: 'chasing',
+      heading: 0,
+      speed: 0,
+      arrestTimer: 0,
+      lastRamAt: -Infinity,
+      lamps: { red: built.redLamp, blue: built.blueLamp },
+    };
+  }
+
+  removeUnit(unit) {
+    if (this.scene) this.scene.remove(unit.group);
+    unit.alive = false;
+    const index = this.units.indexOf(unit);
+    if (index >= 0) this.units.splice(index, 1);
+  }
+
+  // Force one unit to appear at an exact spot (shot staging uses this).
+  spawnAt(position, kind) {
+    const wantedKind = kind === 'officer' ? 'officer' : 'car';
+    const spot = {
+      x: position && typeof position.x === 'number' ? position.x : 0,
+      z: position && typeof position.z === 'number' ? position.z : 0,
+    };
+    const unit = this.buildUnit(wantedKind, spot);
+    this.units.push(unit);
     return unit;
   }
 
-  function removeUnit(unit) {
-    const index = units.indexOf(unit);
-    if (index >= 0) units.splice(index, 1);
-    if (scene) scene.remove(unit.group);
-    unit.alive = false;
-  }
-
-  function nearestRoadPoint(position, roadNetwork) {
-    if (roadNetwork && typeof roadNetwork.nearestRoadPoint === 'function') {
-      return toVector3(roadNetwork.nearestRoadPoint(position));
-    }
-    return snapToFallbackRoad(position);
-  }
-
-  function pickSpawnPoint(playerPosition, roadNetwork) {
-    // Prefer a road point on a ring around the player, biased toward the
-    // police-station side so arrivals read as coming from the station.
+  // Pick a spawn point for a fresh unit: a ring around the player, snapped
+  // to a road when the caller gave us a road network.
+  pickSpawnSpot(playerPos, roads) {
     for (let attempt = 0; attempt < 8; attempt += 1) {
-      let candidate = null;
-      if (roadNetwork && typeof roadNetwork.randomRoadPointNear === 'function') {
-        candidate = toVector3(roadNetwork.randomRoadPointNear(playerPosition, SPAWN_MIN_DISTANCE, SPAWN_MAX_DISTANCE));
+      const ring = ringPoint(this.rng, playerPos.x, playerPos.z, SPAWN_NEAR, SPAWN_FAR);
+      let spot = ring;
+      if (roads && typeof roads.randomRoadPointNear === 'function') {
+        const roadSpot = roads.randomRoadPointNear(playerPos, SPAWN_NEAR, SPAWN_FAR);
+        if (roadSpot) spot = roadSpot;
+      } else if (roads && typeof roads.nearestRoadPoint === 'function') {
+        const roadSpot = roads.nearestRoadPoint(ring);
+        if (roadSpot) spot = roadSpot;
       } else {
-        const stationAngle = Math.atan2(station.x - playerPosition.x, station.z - playerPosition.z);
-        const angle = stationAngle + (random() - 0.5) * Math.PI * 1.2;
-        const radius = SPAWN_MIN_DISTANCE + random() * (SPAWN_MAX_DISTANCE - SPAWN_MIN_DISTANCE);
-        candidate = new THREE.Vector3(
-          playerPosition.x + Math.sin(angle) * radius,
-          0,
-          playerPosition.z + Math.cos(angle) * radius,
-        );
-        candidate = snapToFallbackRoad(candidate);
+        spot = snapToGrid(ring);
       }
-      if (candidate && distance2D(candidate, playerPosition) >= SPAWN_MIN_DISTANCE * 0.8) return candidate;
+      spot.x = limitNumber(spot.x, -CITY_EDGE, CITY_EDGE);
+      spot.z = limitNumber(spot.z, -CITY_EDGE, CITY_EDGE);
+      if (flatDistance(spot.x, spot.z, playerPos.x, playerPos.z) >= SPAWN_NEAR) return spot;
     }
-    // Fallback: a road point directly station-side of the player.
-    const fallback = playerPosition.clone();
-    const toStation = new THREE.Vector3(station.x - playerPosition.x, 0, station.z - playerPosition.z);
-    if (toStation.lengthSq() > 1) toStation.normalize();
-    else toStation.set(0, 0, -1);
-    fallback.addScaledVector(toStation, SPAWN_MIN_DISTANCE + 20);
-    return snapToFallbackRoad(fallback);
+    return { x: playerPos.x + SPAWN_NEAR, z: playerPos.z };
   }
 
-  function desiredCounts() {
-    return {
-      cars: POLICE_CARS_PER_STAR[stars] || 0,
-      officers: OFFICERS_PER_STAR[stars] || 0,
+  // Grow or shrink the force until it matches the current star count.
+  syncForce(playerPos, roads) {
+    const wantCars = PATROL_CARS_PER_STAR[this.stars] || 0;
+    const wantOfficers = OFFICERS_PER_STAR[this.stars] || 0;
+    const anchor = playerPos || this.station;
+    const cars = this.units.filter((unit) => unit.kind === 'car' && unit.alive);
+    const officers = this.units.filter((unit) => unit.kind === 'officer' && unit.alive);
+    for (let i = cars.length; i < wantCars; i += 1) {
+      this.units.push(this.buildUnit('car', this.pickSpawnSpot(anchor, roads)));
+    }
+    for (let i = officers.length; i < wantOfficers; i += 1) {
+      this.units.push(this.buildUnit('officer', this.pickSpawnSpot(anchor, roads)));
+    }
+    // Too many: stand down the farthest ones first.
+    const surplus = (list, want) => {
+      const extra = list.filter((unit) => unit.alive).slice(want);
+      extra.sort((a, b) => flatDistance(b.group.position.x, b.group.position.z, anchor.x, anchor.z)
+        - flatDistance(a.group.position.x, a.group.position.z, anchor.x, anchor.z));
+      for (const unit of extra) {
+        unit.mode = 'standingDown';
+        this.removeUnit(unit);
+      }
     };
+    surplus(cars, wantCars);
+    surplus(officers, wantOfficers);
   }
 
-  function maintainSpawns(playerPosition, roadNetwork) {
-    const wanted = desiredCounts();
-    const liveCars = units.filter((u) => u.kind === 'car' && u.state !== 'leaving').length;
-    const liveOfficers = units.filter((u) => u.kind === 'officer' && u.state !== 'leaving').length;
-    // Officers arrive on foot from nearby streets; cars roll in from the roads.
-    for (let i = liveCars; i < wanted.cars; i += 1) {
-      makeUnit('car', pickSpawnPoint(playerPosition, roadNetwork));
-    }
-    for (let i = liveOfficers; i < wanted.officers; i += 1) {
-      makeUnit('officer', pickSpawnPoint(playerPosition, roadNetwork));
-    }
-    // Too many units for the current level stand down and drive/walk away.
-    let excessCars = liveCars - wanted.cars;
-    let excessOfficers = liveOfficers - wanted.officers;
-    for (const unit of units) {
-      if (unit.state === 'leaving') continue;
-      if (unit.kind === 'car' && excessCars > 0) { unit.state = 'leaving'; excessCars -= 1; }
-      else if (unit.kind === 'officer' && excessOfficers > 0) { unit.state = 'leaving'; excessOfficers -= 1; }
-    }
-  }
+  // --- damage --------------------------------------------------------------
 
-  function updatePoliceCar(unit, dt, playerPosition, roadNetwork) {
-    const target = nearestRoadPoint(playerPosition, roadNetwork);
-    // Chase the road point under the player, not the player himself, so the
-    // car stays on the streets instead of cutting across blocks.
-    const toTarget = new THREE.Vector3(target.x - unit.group.position.x, 0, target.z - unit.group.position.z);
-    const distance = toTarget.length();
-    const cruiseSpeed = 17 + stars * 2.5;
-    const desiredHeading = Math.atan2(toTarget.x, toTarget.z);
-    unit.heading = angleTowards(unit.heading, desiredHeading, 2.4 * dt);
-    const targetSpeed = distance < 6 ? cruiseSpeed * 0.45 : cruiseSpeed;
-    unit.speed += clamp(targetSpeed - unit.speed, -22 * dt, 12 * dt);
-    unit.group.position.x += Math.sin(unit.heading) * unit.speed * dt;
-    unit.group.position.z += Math.cos(unit.heading) * unit.speed * dt;
-    unit.group.position.y = 0;
-    unit.group.rotation.y = unit.heading;
-
-    // Stuck detection: barely moving while chasing means a building or a
-    // traffic jam — back up briefly and swing around it.
-    if (distance2D(unit.group.position, unit.lastPosition) < 0.15 && distance > 8) {
-      unit.stuckTimer += dt;
-      if (unit.stuckTimer > 1.2) {
-        unit.heading += Math.PI * 0.6;
-        unit.speed = -6;
-        unit.stuckTimer = 0;
-      }
-    } else {
-      unit.stuckTimer = 0;
-    }
-    unit.lastPosition.copy(unit.group.position);
-    unit.ramCooldown = Math.max(0, unit.ramCooldown - dt);
-
-    // Flash the light bar, red and blue alternating. sirenPhase advances
-    // once per frame in update(), not once per car, so every car flashes
-    // in step at the same steady rate.
-    const redOn = Math.sin(sirenPhase) > 0;
-    const red = unit.group.userData.redLight;
-    const blue = unit.group.userData.blueLight;
-    if (red) red.material.emissiveIntensity = redOn ? 2.2 : 0.15;
-    if (blue) blue.material.emissiveIntensity = redOn ? 0.15 : 2.2;
-  }
-
-  function updateOfficer(unit, dt, playerPosition, playerInCar) {
-    const toPlayer = new THREE.Vector3(
-      playerPosition.x - unit.group.position.x,
-      0,
-      playerPosition.z - unit.group.position.z,
-    );
-    const distance = toPlayer.length();
-    if (distance > 0.01) toPlayer.normalize();
-    const speed = playerInCar ? OFFICER_RUN_SPEED * 0.9 : OFFICER_RUN_SPEED;
-    unit.group.position.addScaledVector(toPlayer, speed * dt);
-    unit.group.position.y = 0;
-    unit.heading = Math.atan2(toPlayer.x, toPlayer.z);
-    unit.group.rotation.y = unit.heading;
-    // Little run bob so the chase reads as running, not sliding.
-    unit.group.position.y = Math.abs(Math.sin(elapsed * 11 + unit.id)) * 0.06;
-    return distance;
-  }
-
-  function decayWanted(dt, nearestDistance) {
-    if (stars === 0) return false;
-    if (elapsed - lastCrimeAt < DECAY_GRACE_SECONDS) return false;
-    const hidden = nearestDistance === null || nearestDistance > HIDDEN_DISTANCE;
-    const longUnseen = elapsed - lastSeenAt > GIVE_UP_SECONDS;
-    if (!hidden && !longUnseen) return false;
-    const rate = DECAY_RATE_PER_SECOND * (longUnseen ? 2 : 1) * (1 - stars * 0.06);
-    heat = Math.max(0, heat - rate * dt);
-    return announceStarsChanged();
-  }
-
-  // -- Public API -----------------------------------------------------------
-
-  function reportCrime(type, details = {}) {
-    const gain = CRIME_HEAT[type] ?? 10;
-    heat = clamp(heat + gain, 0, MAX_HEAT);
-    lastCrimeAt = elapsed;
-    const changed = announceStarsChanged();
-    return { stars, heat, changed, type, details };
-  }
-
-  function setWantedLevel(level) {
-    const clamped = clamp(Math.round(level) || 0, 0, MAX_WANTED);
-    // Sit in the middle of the star's heat band so one quiet minute drops a
-    // star but a fresh crime does not instantly jump two.
-    heat = clamped === 0 ? 0 : (clamped - 0.5) * HEAT_PER_STAR;
-    lastCrimeAt = elapsed;
-    const changed = announceStarsChanged();
-    return { stars, heat, changed };
-  }
-
-  function update(dt, context = {}) {
-    const step = Math.min(Math.max(dt, 0), 0.1);
-    elapsed += step;
-    const events = {
-      wantedChanged: false,
-      busted: false,
-      wasted: false,
-      wastedReason: null,
-      spawned: 0,
-      despawned: 0,
-      rammed: false,
-    };
-    const playerPosition = toVector3(context.playerPosition, new THREE.Vector3());
-    const playerInCar = Boolean(context.playerInCar);
-    const roadNetwork = context.roadNetwork || null;
-
-    const beforeCount = units.length;
-    maintainSpawns(playerPosition, roadNetwork);
-    events.spawned = Math.max(0, units.length - beforeCount);
-    // One shared siren phase for every light bar this frame.
-    sirenPhase += step * 6;
-
-    let nearestDistance = null;
-    for (const unit of [...units]) {
-      if (!unit.alive) continue;
-      const distance = distance2D(unit.group.position, playerPosition);
-      if (nearestDistance === null || distance < nearestDistance) {
-        nearestDistance = distance;
-      }
-    }
-    if (nearestDistance !== null && nearestDistance < 90) lastSeenAt = elapsed;
-
-    // Wasted: Leo's health is gone, or the car he is driving is destroyed.
-    if (typeof context.playerHealth === 'number' && context.playerHealth <= 0) {
-      events.wasted = true;
-      events.wastedReason = 'health';
-      if (onWasted) onWasted('health');
-      return events;
-    }
-    if (playerInCar && typeof context.playerCarHealth === 'number' && context.playerCarHealth <= 0) {
-      events.wasted = true;
-      events.wastedReason = 'vehicleDestroyed';
-      if (onWasted) onWasted('vehicleDestroyed');
-      return events;
-    }
-
-    for (const unit of [...units]) {
-      if (!unit.alive) continue;
-      if (unit.state === 'leaving') {
-        // Drive / walk away from the player, then vanish off the map.
-        const away = new THREE.Vector3(
-          unit.group.position.x - playerPosition.x,
-          0,
-          unit.group.position.z - playerPosition.z,
-        );
-        if (away.lengthSq() < 1) away.set(0, 0, 1);
-        away.normalize();
-        const speed = unit.kind === 'car' ? 14 : 4;
-        unit.group.position.addScaledVector(away, speed * step);
-        unit.group.rotation.y = Math.atan2(away.x, away.z);
-        unit.leaveTimer += step;
-        if (distance2D(unit.group.position, playerPosition) > DESPAWN_DISTANCE || unit.leaveTimer > 12) {
-          removeUnit(unit);
-          events.despawned += 1;
-        }
-        continue;
-      }
-
-      if (unit.kind === 'car') {
-        updatePoliceCar(unit, step, playerPosition, roadNetwork);
-        // Ram: a police car that catches the player's car slams it.
-        if (playerInCar) {
-          const carPosition = context.playerCarPosition
-            ? toVector3(context.playerCarPosition)
-            : playerPosition;
-          if (distance2D(unit.group.position, carPosition) < RAM_RANGE && unit.ramCooldown <= 0) {
-            unit.ramCooldown = RAM_COOLDOWN;
-            unit.speed = Math.max(unit.speed, 10);
-            events.rammed = true;
-            if (onRam) onRam(RAM_DAMAGE);
-            if (context.playerCar && typeof context.playerCar.applyImpulse === 'function') {
-              const push = new THREE.Vector3(
-                carPosition.x - unit.group.position.x, 0, carPosition.z - unit.group.position.z,
-              ).normalize().multiplyScalar(6);
-              context.playerCar.applyImpulse(push);
-            }
-          }
-        }
-      } else {
-        const distance = updateOfficer(unit, step, playerPosition, playerInCar);
-        // Busted: an officer who stays on Leo's heels on foot arrests him.
-        // Officers cannot bust Leo while he is inside a car.
-        if (!playerInCar && distance < BUST_RANGE) {
-          unit.bustTimer += step;
-          if (unit.bustTimer >= BUST_HOLD_SECONDS) {
-            events.busted = true;
-            if (onBusted) onBusted();
-            return events;
-          }
-        } else {
-          unit.bustTimer = 0;
-        }
-      }
-    }
-
-    if (decayWanted(step, nearestDistance)) events.wantedChanged = true;
-    return events;
-  }
-
-  function damageUnit(unit, amount) {
+  // Hurt one unit. Returns true when the hit killed it.
+  damageUnit(unit, amount) {
     if (!unit || !unit.alive) return false;
-    unit.health = Math.max(0, unit.health - amount);
+    unit.health = Math.max(0, unit.health - (amount || 0));
     if (unit.health > 0) return false;
-    removeUnit(unit);
+    unit.alive = false;
+    if (this.scene) this.scene.remove(unit.group);
+    const index = this.units.indexOf(unit);
+    if (index >= 0) this.units.splice(index, 1);
     return true;
   }
 
-  function spawnAt(position, kind = 'car') {
-    const point = nearestRoadPoint(toVector3(position), null);
-    return makeUnit(kind === 'officer' ? 'officer' : 'car', point);
+  // --- the frame step ------------------------------------------------------
+
+  update(dt, context) {
+    const ctx = context || {};
+    const step = Math.max(0, dt || 0);
+    this.clock += step;
+    const events = { busted: false, wasted: false };
+    if (this.ended) return events;
+
+    const playerPos = ctx.playerPosition || { x: 0, y: 0, z: 0 };
+    const playerInCar = Boolean(ctx.playerInCar);
+    const playerHealth = typeof ctx.playerHealth === 'number' ? ctx.playerHealth : 100;
+    const playerCarHealth = typeof ctx.playerCarHealth === 'number' ? ctx.playerCarHealth : null;
+    const playerCarPos = ctx.playerCarPosition || null;
+    const roads = ctx.roadNetwork || null;
+
+    // Wasted: Leo is down, or his car is a wreck.
+    if (playerHealth <= 0) {
+      this.ended = true;
+      if (this.onWasted) this.onWasted('health');
+      events.wasted = true;
+      return events;
+    }
+    if (playerCarHealth !== null && playerCarHealth <= 0) {
+      this.ended = true;
+      if (this.onWasted) this.onWasted('vehicleDestroyed');
+      events.wasted = true;
+      return events;
+    }
+
+    // How close is the nearest unit? That decides hiding and giving up.
+    let nearest = Infinity;
+    for (const unit of this.units) {
+      if (!unit.alive) continue;
+      const d = flatDistance(
+        unit.group.position.x, unit.group.position.z, playerPos.x, playerPos.z,
+      );
+      if (d < nearest) nearest = d;
+    }
+    const hidden = nearest > HIDDEN_RANGE || this.units.length === 0;
+    if (!hidden) this.lastSeenAt = this.clock;
+
+    // Heat cools only after the grace period, and only while hidden.
+    if (hidden && this.clock - this.lastCrimeAt > COOLDOWN_AFTER_CRIME && this.heat > 0) {
+      let loss = HEAT_LOSS_PER_SECOND * step;
+      if (this.clock - this.lastSeenAt > UNSEEN_GIVE_UP) loss *= 2;
+      this.heat = Math.max(0, this.heat - loss);
+      this.publishStars();
+    }
+
+    // Keep the force matched to the stars, then move every unit.
+    this.syncForce(playerPos, roads);
+    for (const unit of [...this.units]) {
+      if (!unit.alive) continue;
+      if (unit.kind === 'car') {
+        this.stepPatrolCar(unit, step, playerPos, playerCarPos, playerInCar, ctx);
+      } else {
+        const caught = this.stepOfficer(unit, step, playerPos, playerInCar);
+        if (caught) {
+          this.ended = true;
+          if (this.onBusted) this.onBusted();
+          events.busted = true;
+          this.standDownAll();
+          return events;
+        }
+      }
+    }
+
+    // Units that gave up and drifted far away quietly leave.
+    for (const unit of [...this.units]) {
+      if (!unit.alive) continue;
+      if (unit.mode === 'standingDown') {
+        const d = flatDistance(
+          unit.group.position.x, unit.group.position.z, playerPos.x, playerPos.z,
+        );
+        if (d > STAND_DOWN_RANGE) this.removeUnit(unit);
+      }
+    }
+
+    this.flashSirens();
+    return events;
   }
 
-  function reset() {
-    for (const unit of [...units]) removeUnit(unit);
-    heat = 0;
-    stars = 0;
-    lastCrimeAt = -Infinity;
-    lastSeenAt = -Infinity;
+  // One patrol car, one frame: steer at the target, close in, ram on contact.
+  stepPatrolCar(unit, dt, playerPos, playerCarPos, playerInCar, ctx) {
+    const target = playerInCar && playerCarPos ? playerCarPos : playerPos;
+    const dx = target.x - unit.group.position.x;
+    const dz = target.z - unit.group.position.z;
+    const distance = Math.sqrt(dx * dx + dz * dz);
+    if (distance < 0.01) return;
+    const wantedHeading = Math.atan2(dx, dz);
+    unit.heading = steerAngle(unit.heading, wantedHeading, CAR_TURN_RATE * dt);
+    const cruise = Math.min(CAR_TOP_SPEED, 12 + this.stars * 2.5);
+    const desiredSpeed = distance > 10 ? cruise : cruise * 0.55;
+    unit.speed += (desiredSpeed - unit.speed) * Math.min(1, dt * 2.5);
+    unit.group.position.x += Math.sin(unit.heading) * unit.speed * dt;
+    unit.group.position.z += Math.cos(unit.heading) * unit.speed * dt;
+    unit.group.rotation.y = unit.heading;
+    unit.mode = 'chasing';
+
+    // Ram: close to the player's car, cooldown respected, one hit at a time.
+    if (playerInCar && playerCarPos && distance < RAM_RANGE) {
+      if (this.clock - unit.lastRamAt > RAM_PAUSE) {
+        unit.lastRamAt = this.clock;
+        // Shove the patrol car back a touch so it does not glue itself on.
+        unit.group.position.x -= Math.sin(unit.heading) * 1.2;
+        unit.group.position.z -= Math.cos(unit.heading) * 1.2;
+        if (this.onRam) this.onRam(RAM_HIT);
+      }
+    }
+    void ctx;
   }
 
-  function dispose() {
-    reset();
+  // One officer, one frame: run at Leo on foot. Returns true on a bust.
+  stepOfficer(unit, dt, playerPos, playerInCar) {
+    if (playerInCar) {
+      unit.arrestTimer = 0;
+      unit.mode = 'chasing';
+      return false;
+    }
+    const dx = playerPos.x - unit.group.position.x;
+    const dz = playerPos.z - unit.group.position.z;
+    const distance = Math.sqrt(dx * dx + dz * dz);
+    if (distance > 0.01) {
+      const wantedHeading = Math.atan2(dx, dz);
+      unit.heading = steerAngle(unit.heading, wantedHeading, 5.0 * dt);
+      unit.group.position.x += Math.sin(unit.heading) * OFFICER_SPEED * dt;
+      unit.group.position.z += Math.cos(unit.heading) * OFFICER_SPEED * dt;
+      unit.group.rotation.y = unit.heading;
+    }
+    unit.mode = 'chasing';
+    if (distance < ARREST_RANGE) {
+      unit.arrestTimer += dt;
+      if (unit.arrestTimer >= ARREST_HOLD) return true;
+    } else {
+      unit.arrestTimer = 0;
+    }
+    return false;
   }
 
-  function getBlips() {
-    return units
-      .filter((unit) => unit.alive)
-      .map((unit) => ({ x: unit.group.position.x, z: unit.group.position.z, kind: unit.kind }));
+  // Alternate the red and blue halves of every light bar.
+  flashSirens() {
+    const phase = Math.floor(this.clock * 2.8) % 2 === 0;
+    for (const unit of this.units) {
+      if (!unit.lamps) continue;
+      unit.lamps.red.emissiveIntensity = phase ? 1.8 : 0.15;
+      unit.lamps.blue.emissiveIntensity = phase ? 0.15 : 1.8;
+    }
   }
 
-  return {
-    get wantedLevel() { return stars; },
-    get heat() { return heat; },
-    get sirenActive() { return stars > 0 && units.some((u) => u.state === 'chasing'); },
-    get units() { return units; },
-    getWantedLevel: () => stars,
-    getHeat: () => heat,
-    isWanted: () => stars > 0,
-    reportCrime,
-    setWantedLevel,
-    addHeat: (amount) => {
-      heat = clamp(heat + amount, 0, MAX_HEAT);
-      announceStarsChanged();
-      return stars;
-    },
-    clearWanted: () => setWantedLevel(0),
-    update,
-    getUnits: () => units.filter((unit) => unit.alive),
-    getBlips,
-    damageUnit,
-    spawnAt,
-    reset,
-    dispose,
-  };
+  // Send every unit home without a fuss (after a bust, mainly).
+  standDownAll() {
+    for (const unit of [...this.units]) {
+      unit.mode = 'standingDown';
+      this.removeUnit(unit);
+    }
+  }
+
+  // --- lifecycle -----------------------------------------------------------
+
+  reset() {
+    this.standDownAll();
+    this.heat = 0;
+    this.stars = 0;
+    this.ended = false;
+    this.lastCrimeAt = -Infinity;
+    this.lastSeenAt = -Infinity;
+  }
+
+  dispose() {
+    for (const unit of [...this.units]) this.removeUnit(unit);
+    this.heat = 0;
+    this.stars = 0;
+    this.ended = false;
+  }
+}
+
+// The factory main.js calls. Options:
+// { scene, policeStation, onWantedChanged(level), onBusted(), onWasted(reason),
+//   onRam(amount), random }
+export function createPoliceSystem(options = {}) {
+  return new PoliceDepartment(options);
 }
 
 // Convenience: the star count for a heat value, for HUD code that keeps its
 // own heat number instead of asking this module.
 export function starsForHeatValue(value) {
   if (value <= 0) return 0;
-  return clamp(Math.ceil(value / HEAT_PER_STAR), 1, MAX_WANTED);
+  return limitNumber(Math.floor(value / HEAT_PER_STAR), 0, MAX_WANTED);
 }
