@@ -281,6 +281,7 @@ const pickupMeshes = [];
 
 vehicles.spawnParked(10);
 vehicles.spawnTraffic(12);
+vehicles.spawnBikes(5);
 
 // ---------------------------------------------------------------------------
 // Input
@@ -863,9 +864,15 @@ function stepGame(dt) {
     playerZ: player.group.position.z,
     playerHeading: player.inVehicle && playerCar ? playerCar.heading : player.heading,
     driving: player.inVehicle,
-    traffic: vehicles.traffic.map((car) => ({
-      x: car.group.position.x, z: car.group.position.z,
-    })),
+    traffic: [
+      ...vehicles.traffic.map((car) => ({
+        x: car.group.position.x, z: car.group.position.z,
+      })),
+      // Motorbikes are traffic too: they read as grey dots like the cars.
+      ...vehicles.bikes.map((bike) => ({
+        x: bike.group.position.x, z: bike.group.position.z,
+      })),
+    ],
     police: policeBlips,
     marker: missions.getMarkerTarget(),
     pickups,

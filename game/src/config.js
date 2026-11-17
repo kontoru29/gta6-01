@@ -86,6 +86,24 @@ export const CAR_TYPES = {
   van: { length: 5.0, width: 2.0, height: 1.9, topSpeed: 26, accel: 10, label: 'Van' },
   pickup: { length: 4.8, width: 2.0, height: 1.7, topSpeed: 30, accel: 12, label: 'Pickup' },
   police: { length: 4.5, width: 1.95, height: 1.4, topSpeed: 38, accel: 17, label: 'Patrol car' },
+  // The sport cars: open-top roadster and low supercar, both quicker than
+  // the sport coupe and rare in traffic by design.
+  roadster: { length: 4.2, width: 1.9, height: 1.15, topSpeed: 48, accel: 20, label: 'Roadster' },
+  supercar: { length: 4.4, width: 2.0, height: 1.1, topSpeed: 52, accel: 22, label: 'Supercar' },
+};
+
+// Sport cars and motorbikes: how often they show up and how quick they are.
+// These numbers mirror the vehicle and police modules' own tuning — change
+// them together when rebalancing, so the two places never drift apart.
+export const VEHICLES = {
+  sportTrafficChance: 0.12, // sport cars in traffic: roughly 1 in 8
+  sportParkedChance: 0.15, // sport cars among parked cars
+  bikeCruiseSpeed: 16, // m/s, NPC bikes flow faster than car traffic
+  bikeTopSpeed: 21,
+  bikeTrafficCount: 5,
+  bikeWeave: 1.6, // metres of lane-splitting sway, each side
+  policeBikeTopSpeed: 33, // police bikes outrun the patrol cars (26)
+  policeBikeTurnRate: 3.6, // radians per second of steering
 };
 
 // Paint colours for traffic and parked cars (hex numbers, bright golden-hour set).
@@ -115,6 +133,8 @@ export const WANTED = {
   // How many police units hunt the player at each star level (index = stars).
   policeCarsPerStar: [0, 1, 1, 2, 3, 4],
   policeFootPerStar: [0, 0, 1, 2, 3, 4],
+  // Police motorbikes join the chase from two stars (index = stars).
+  policeBikesPerStar: [0, 0, 1, 1, 2, 2],
   bustRange: 2.4, // an officer this close on foot busts the player
   bustTime: 2.0, // seconds inside bust range before the bust lands
   escapeRadius: 90, // get this far from every police unit to start cooling down

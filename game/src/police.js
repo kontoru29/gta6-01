@@ -3,12 +3,15 @@
 //
 // One system owns everything about the law in Solmar Bay. Crimes feed a
 // heat number (0-100); every 20 heat is one wanted star, up to five. The
-// star count decides how many patrol cars and foot officers hunt Leo:
-// more stars means more units, faster cars and less patience. Heat cools
-// down only while Leo is out of sight for a while, so a chase ends by
-// breaking line of sight and staying away, not by waiting it out in the
-// open. Officers on foot can arrest Leo (busted); a wrecked car or zero
-// health ends the run (wasted).
+// star count decides how many patrol cars, foot officers and police
+// motorbikes hunt Leo: more stars means more units, faster cars and less
+// patience. Motorbikes join from two stars — quicker and nimbler than the
+// patrol cars, they cut through traffic to stay on Leo's tail, and on foot
+// a rider can grab him just like an officer. Heat cools down only while
+// Leo is out of sight for a while, so a chase ends by breaking line of
+// sight and staying away, not by waiting it out in the open. Officers on
+// foot can arrest Leo (busted); a wrecked car or zero health ends the run
+// (wasted).
 //
 // The system is created once by main.js and driven every frame through
 // update(dt, context). It never touches the HUD, the missions or the save
@@ -46,6 +49,9 @@ const MAX_HEAT = MAX_WANTED * HEAT_PER_STAR;
 // Units on the street at each star count (index = stars).
 const PATROL_CARS_PER_STAR = [0, 1, 2, 3, 4, 5];
 const OFFICERS_PER_STAR = [0, 0, 1, 1, 2, 3];
+// Police motorbikes join the chase from two stars: quicker and nimbler
+// than the patrol cars, they cut through traffic to stay on Leo's tail.
+const BIKES_PER_STAR = [0, 0, 1, 1, 2, 2];
 
 // Heat only starts falling this long after the last crime, and only while
 // Leo is hidden from every unit.
@@ -72,6 +78,11 @@ const OFFICER_TOUGHNESS = 60; // health of one officer
 const PATROL_TOUGHNESS = 120; // health of one patrol car
 const CAR_TOP_SPEED = 26; // fastest a patrol car drives in a chase
 const CAR_TURN_RATE = 2.4; // radians per second of steering
+// A police bike outruns the patrol cars and turns on a coin: it is the
+// unit that stays glued to Leo when the cars fall behind in traffic.
+const BIKE_TOP_SPEED = 33;
+const BIKE_TURN_RATE = 3.6;
+const BIKE_TOUGHNESS = 60;
 
 // Fallbacks used when the caller hands us no road network at all.
 const FALLBACK_ROAD_GAP = 40;
@@ -226,6 +237,88 @@ function makeOfficerMesh() {
   return group;
 }
 
+// A police motorbike: a white patrol bike with a navy rider in a white
+// helmet, and a small red-and-blue light pod on the rear rack that flashes
+// with the rest of the force. The rider and bike sit in an inner lean
+// group, so the whole unit banks into corners while it chases.
+// Police heading convention: 0 faces +Z, so a left turn (heading growing)
+// leans the bike toward +X — the lean group rolls the other way round
+// from the traffic bikes in vehicles.js, which face -Z.
+function makePoliceBikeMesh() {
+  const group = new THREE.Group();
+  const leanGroup = new THREE.Group();
+  group.add(leanGroup);
+
+  const paint = new THREE.MeshStandardMaterial({ color: 0xf2f0e8, metalness: 0.35, roughness: 0.45 });
+  const dark = new THREE.MeshStandardMaterial({ color: 0x14181f, metalness: 0.5, roughness: 0.5 });
+  const tyre = new THREE.MeshStandardMaterial({ color: 0x0c0c0c, roughness: 0.9 });
+  const chrome = new THREE.MeshStandardMaterial({ color: 0xb9c0c9, roughness: 0.25, metalness: 0.8 });
+  const uniform = new THREE.MeshStandardMaterial({ color: 0x1c2f55, roughness: 0.75 });
+  const helmetMat = new THREE.MeshStandardMaterial({ color: 0xf2f0e6, roughness: 0.3 });
+  const skin = new THREE.MeshStandardMaterial({ color: 0xc98d64, roughness: 0.7 });
+
+  const addBox = (material, w, h, d, x, y, z, parent = leanGroup) => {
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), material);
+    mesh.position.set(x, y, z);
+    mesh.castShadow = true;
+    parent.add(mesh);
+    return mesh;
+  };
+
+  // Two wheels, frame spine, tank, seat and handlebar. The bike faces +Z
+  // here (the police module's forward), so the front wheel is at +Z.
+  const wheelGeo = new THREE.CylinderGeometry(0.34, 0.34, 0.12, 16);
+  for (const wz of [-0.55, 0.55]) {
+    const wheel = new THREE.Mesh(wheelGeo, tyre);
+    wheel.rotation.z = Math.PI / 2;
+    wheel.position.set(0, 0.34, wz);
+    wheel.castShadow = true;
+    leanGroup.add(wheel);
+  }
+  addBox(dark, 0.09, 0.09, 1.35, 0, 0.62, 0);
+  addBox(paint, 0.34, 0.22, 0.5, 0, 0.78, 0.08);
+  addBox(dark, 0.3, 0.1, 0.45, 0, 0.8, -0.38);
+  addBox(chrome, 0.56, 0.06, 0.06, 0, 0.95, 0.55);
+
+  // The rider: navy uniform, white helmet, leaning forward over the tank.
+  const torso = addBox(uniform, 0.42, 0.55, 0.26, 0, 1.15, -0.08);
+  torso.rotation.x = -0.5;
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.16, 12, 10), skin);
+  head.position.set(0, 1.5, 0.14);
+  head.castShadow = true;
+  leanGroup.add(head);
+  const helmet = new THREE.Mesh(new THREE.SphereGeometry(0.19, 12, 10), helmetMat);
+  helmet.position.set(0, 1.52, 0.14);
+  helmet.castShadow = true;
+  leanGroup.add(helmet);
+  for (const side of [-1, 1]) {
+    const arm = addBox(uniform, 0.11, 0.5, 0.12, side * 0.24, 1.28, 0.3);
+    arm.rotation.x = 0.9;
+    const leg = addBox(uniform, 0.14, 0.5, 0.14, side * 0.2, 0.72, -0.18);
+    leg.rotation.x = -0.35;
+  }
+
+  // Rear light pod: red on the left, blue on the right, flashing with
+  // the patrol cars. Materials are returned so flashSirens can drive them.
+  const redLamp = new THREE.MeshStandardMaterial({
+    color: 0xaa1111, emissive: 0xff2020, emissiveIntensity: 0.2,
+  });
+  const blueLamp = new THREE.MeshStandardMaterial({
+    color: 0x1122aa, emissive: 0x2244ff, emissiveIntensity: 0.2,
+  });
+  const rack = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.08, 0.3), dark);
+  rack.position.set(0, 0.95, -0.55);
+  leanGroup.add(rack);
+  const redPod = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.12, 0.22), redLamp);
+  redPod.position.set(-0.13, 1.04, -0.55);
+  leanGroup.add(redPod);
+  const bluePod = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.12, 0.22), blueLamp);
+  bluePod.position.set(0.13, 1.04, -0.55);
+  leanGroup.add(bluePod);
+
+  return { group, leanGroup, redLamp, blueLamp };
+}
+
 // ---------------------------------------------------------------------------
 // The department itself.
 // ---------------------------------------------------------------------------
@@ -368,6 +461,27 @@ class PoliceDepartment {
         lamps: null,
       };
     }
+    if (kind === 'bike') {
+      const built = makePoliceBikeMesh();
+      built.group.position.set(spot.x, 0, spot.z);
+      if (this.scene) this.scene.add(built.group);
+      return {
+        id,
+        kind: 'bike',
+        group: built.group,
+        leanGroup: built.leanGroup,
+        health: BIKE_TOUGHNESS,
+        maxHealth: BIKE_TOUGHNESS,
+        alive: true,
+        mode: 'chasing',
+        heading: 0,
+        speed: 0,
+        lean: 0,
+        arrestTimer: 0,
+        lastRamAt: -Infinity,
+        lamps: { red: built.redLamp, blue: built.blueLamp },
+      };
+    }
     const built = makePatrolCarMesh();
     built.group.position.set(spot.x, 0, spot.z);
     if (this.scene) this.scene.add(built.group);
@@ -396,7 +510,7 @@ class PoliceDepartment {
 
   // Force one unit to appear at an exact spot (shot staging uses this).
   spawnAt(position, kind) {
-    const wantedKind = kind === 'officer' ? 'officer' : 'car';
+    const wantedKind = kind === 'officer' ? 'officer' : kind === 'bike' ? 'bike' : 'car';
     const spot = {
       x: position && typeof position.x === 'number' ? position.x : 0,
       z: position && typeof position.z === 'number' ? position.z : 0,
@@ -432,14 +546,19 @@ class PoliceDepartment {
   syncForce(playerPos, roads) {
     const wantCars = PATROL_CARS_PER_STAR[this.stars] || 0;
     const wantOfficers = OFFICERS_PER_STAR[this.stars] || 0;
+    const wantBikes = BIKES_PER_STAR[this.stars] || 0;
     const anchor = playerPos || this.station;
     const cars = this.units.filter((unit) => unit.kind === 'car' && unit.alive);
     const officers = this.units.filter((unit) => unit.kind === 'officer' && unit.alive);
+    const bikes = this.units.filter((unit) => unit.kind === 'bike' && unit.alive);
     for (let i = cars.length; i < wantCars; i += 1) {
       this.units.push(this.buildUnit('car', this.pickSpawnSpot(anchor, roads)));
     }
     for (let i = officers.length; i < wantOfficers; i += 1) {
       this.units.push(this.buildUnit('officer', this.pickSpawnSpot(anchor, roads)));
+    }
+    for (let i = bikes.length; i < wantBikes; i += 1) {
+      this.units.push(this.buildUnit('bike', this.pickSpawnSpot(anchor, roads)));
     }
     // Too many: stand down the farthest ones first.
     const surplus = (list, want) => {
@@ -453,6 +572,7 @@ class PoliceDepartment {
     };
     surplus(cars, wantCars);
     surplus(officers, wantOfficers);
+    surplus(bikes, wantBikes);
   }
 
   // --- damage --------------------------------------------------------------
@@ -525,6 +645,15 @@ class PoliceDepartment {
       if (!unit.alive) continue;
       if (unit.kind === 'car') {
         this.stepPatrolCar(unit, step, playerPos, playerCarPos, playerInCar, ctx);
+      } else if (unit.kind === 'bike') {
+        const caught = this.stepBike(unit, step, playerPos, playerInCar);
+        if (caught) {
+          this.ended = true;
+          if (this.onBusted) this.onBusted();
+          events.busted = true;
+          this.standDownAll();
+          return events;
+        }
       } else {
         const caught = this.stepOfficer(unit, step, playerPos, playerInCar);
         if (caught) {
@@ -580,6 +709,43 @@ class PoliceDepartment {
       }
     }
     void ctx;
+  }
+
+  // One police bike, one frame: outrun the patrol cars, cut through
+  // traffic and stay on Leo's tail. Bikes never ram a car — they are too
+  // light for that — but on foot a rider grabs Leo just like an officer
+  // does. Returns true when the rider makes the bust.
+  stepBike(unit, dt, playerPos, playerInCar) {
+    const dx = playerPos.x - unit.group.position.x;
+    const dz = playerPos.z - unit.group.position.z;
+    const distance = Math.sqrt(dx * dx + dz * dz);
+    if (distance < 0.01) return false;
+    const wantedHeading = Math.atan2(dx, dz);
+    const beforeHeading = unit.heading;
+    unit.heading = steerAngle(unit.heading, wantedHeading, BIKE_TURN_RATE * dt);
+    const cruise = Math.min(BIKE_TOP_SPEED, 14 + this.stars * 3);
+    const desiredSpeed = distance > 12 ? cruise : cruise * 0.6;
+    unit.speed += (desiredSpeed - unit.speed) * Math.min(1, dt * 3);
+    unit.group.position.x += Math.sin(unit.heading) * unit.speed * dt;
+    unit.group.position.z += Math.cos(unit.heading) * unit.speed * dt;
+    unit.group.rotation.y = unit.heading;
+    unit.mode = 'chasing';
+
+    // Lean into the turn. This module faces +Z, so a growing heading is a
+    // left turn and the bike banks toward +X: the lean group rolls the
+    // opposite way from the traffic bikes, which face -Z.
+    const turnRate = (unit.heading - beforeHeading) / Math.max(dt, 0.001);
+    const leanTarget = limitNumber(turnRate * -0.12, -0.5, 0.5);
+    unit.lean = (unit.lean || 0) + (leanTarget - (unit.lean || 0)) * Math.min(1, dt * 8);
+    if (unit.leanGroup) unit.leanGroup.rotation.z = unit.lean;
+
+    if (!playerInCar && distance < ARREST_RANGE) {
+      unit.arrestTimer += dt;
+      if (unit.arrestTimer >= ARREST_HOLD) return true;
+    } else {
+      unit.arrestTimer = 0;
+    }
+    return false;
   }
 
   // One officer, one frame: run at Leo on foot. Returns true on a bust.

@@ -1,14 +1,20 @@
-// vehicles.js — every car in Solmar Bay: factory, driving, theft, traffic.
+// vehicles.js — every car and motorbike in Solmar Bay: factory, driving,
+// theft, traffic.
 //
 // This module owns all vehicles. One car factory and one arcade driving
 // model serve both the player's car and the traffic cars, so a stolen
 // traffic car drives exactly like any other car. It covers:
-//   * procedural cars in four original body styles (sedan, hatchback, van,
-//     sport coupe) in bright coastal paint colours — no real-world models,
+//   * procedural cars in six original body styles (sedan, hatchback, van,
+//     sport coupe, open-top roadster, low supercar) in bright coastal
+//     paint colours — no real-world models. The three sport cars are
+//     quicker than the rest and rare in traffic by design;
+//   * motorbikes: NPC riders who filter through traffic faster than the
+//     cars, sway across the lane and lean into every turn. Bikes are
+//     never enterable — they make the streets feel alive;
 //   * arcade driving: acceleration, steering, brake and handbrake, with
-//     simple circle-vs-building and car-vs-car collision,
+//     simple circle-vs-building and car-vs-car collision;
 //   * stealing: walk up to a parked car or a car in traffic and press F to
-//     take it (a traffic driver bails out and runs off on foot),
+//     take it (a traffic driver bails out and runs off on foot);
 //   * traffic AI: cars follow the city module's road lanes, brake for the
 //     car ahead and swerve around a blocked lane, and never leave the road.
 //
@@ -71,8 +77,10 @@ const TOP_SPEED = {
   hatchback: 30, // ~108 km/h
   van: 25, // ~90 km/h
   sport: 44, // ~158 km/h
+  roadster: 48, // ~173 km/h, open-top two-seater
+  supercar: 52, // ~187 km/h, the fastest thing on the island
 };
-const ACCEL = { sedan: 13, hatchback: 12, van: 9, sport: 18 };
+const ACCEL = { sedan: 13, hatchback: 12, van: 9, sport: 18, roadster: 20, supercar: 22 };
 const BRAKE_FORCE = 30;
 const REVERSE_TOP_SPEED = 9;
 const STEER_RATE = 1.9; // radians per second at full lock, low speed
@@ -86,6 +94,22 @@ const TRAFFIC_SWERVE_AHEAD = 14; // metres: start steering around a block
 const TRAFFIC_DESPAWN = 130; // metres from player before a traffic car respawns
 
 const BODY_TYPES = ['sedan', 'hatchback', 'van', 'sport'];
+// Every car type the factory accepts, including the two extra sport cars.
+const ALL_CAR_TYPES = ['sedan', 'hatchback', 'van', 'sport', 'roadster', 'supercar'];
+// The three sport cars, quick and rare: traffic and parking pick one of
+// these only sometimes, so spotting one still feels special.
+const SPORT_TYPES = ['sport', 'roadster', 'supercar'];
+const SPORT_TRAFFIC_CHANCE = 0.12; // sport cars in traffic: roughly 1 in 8
+const SPORT_PARKED_CHANCE = 0.15; // sport cars among parked cars
+
+// Motorbike tuning: bikes flow faster than cars and sway across the lane
+// as they filter through traffic.
+const BIKE_CRUISE = 16; // m/s, about 58 km/h — quicker than car traffic
+const BIKE_TOP_SPEED = 21;
+const BIKE_ACCEL = 12;
+const BIKE_WEAVE = 1.6; // metres of lane-splitting sway, each side
+const BIKE_WEAVE_RATE = 1.1; // sway oscillations per second, roughly
+const BIKE_COUNT = 5;
 const PAINT_COLORS = [
   0xe23b3b, // sunset red
   0x2f7fd0, // ocean blue
@@ -126,6 +150,8 @@ function buildCarBody(type, colour) {
     hatchback: [3.6, 1.8, 0.68, 2.0],
     van: [4.8, 2.0, 1.05, 3.4],
     sport: [4.3, 1.95, 0.5, 1.7],
+    roadster: [4.2, 1.9, 0.5, 1.4],
+    supercar: [4.4, 2.0, 0.44, 1.5],
   }[type];
   const [length, width, bodyHeight, cabinLength] = dims;
 
@@ -135,10 +161,28 @@ function buildCarBody(type, colour) {
   const cabinH = type === 'van' ? 1.1 : 0.62;
   const cabin = addBox(glass, width - 0.24, cabinH, cabinLength, 0, cabinY, type === 'van' ? 0.1 : 0.15);
   // Paint roof strip over the glass cabin so it reads as a car, not a box.
-  addBox(paint, width - 0.18, 0.08, cabinLength - 0.3, 0, cabinY + cabinH / 2, type === 'van' ? 0.1 : 0.15);
+  // The roadster keeps its top open: no roof strip, just a low windshield.
+  if (type !== 'roadster') {
+    addBox(paint, width - 0.18, 0.08, cabinLength - 0.3, 0, cabinY + cabinH / 2, type === 'van' ? 0.1 : 0.15);
+  }
   if (type === 'sport') {
     // Low rear spoiler.
     addBox(paint, width - 0.3, 0.07, 0.3, 0, 1.05, length / 2 - 0.15);
+  }
+  if (type === 'roadster') {
+    // Low windshield raked back over the open cockpit, plus a long hood
+    // line: the roadster reads as a two-seater even from a distance.
+    addBox(glass, width - 0.5, 0.3, 0.06, 0, cabinY + 0.22, -0.55);
+    addBox(paint, width - 0.24, 0.06, 0.9, 0, 0.86, -length / 2 + 0.5);
+  }
+  if (type === 'supercar') {
+    // Big rear wing on twin struts, a front splitter lip, and a black
+    // roof panel so the car reads lower and meaner than the sport coupe.
+    addBox(paint, width - 0.3, 0.06, 0.34, 0, 1.02, length / 2 - 0.12);
+    addBox(paint, 0.08, 0.22, 0.06, -width / 2 + 0.35, 0.86, length / 2 - 0.12);
+    addBox(paint, 0.08, 0.22, 0.06, width / 2 - 0.35, 0.86, length / 2 - 0.12);
+    addBox(paint, width - 0.2, 0.08, 0.3, 0, 0.32, -length / 2 + 0.05);
+    addBox(tyre, width - 0.3, 0.05, cabinLength - 0.5, 0, cabinY + cabinH / 2 + 0.02, 0.15);
   }
   if (type === 'van') {
     // Side panel line and a roof rack hint.
@@ -179,7 +223,7 @@ function buildCarBody(type, colour) {
 }
 
 export function createCar(scene, type = 'sedan', colour = 0xe23b3b, x = 0, z = 0, heading = 0) {
-  if (!BODY_TYPES.includes(type)) type = 'sedan';
+  if (!ALL_CAR_TYPES.includes(type)) type = 'sedan';
   const built = buildCarBody(type, colour);
   const group = built.group;
   group.position.set(x, 0, z);
@@ -227,6 +271,114 @@ export function createCar(scene, type = 'sedan', colour = 0xe23b3b, x = 0, z = 0
     },
   };
   return car;
+}
+
+// ---------------------------------------------------------------------------
+// Motorbikes — NPC traffic only. A bike is a slim two-wheeler with a rider
+// who leans into corners. Bikes are never enterable: they exist to make the
+// traffic feel alive and to give Leo something quick to dodge. The bike's
+// forward is -Z like the cars, and it leans by rolling its inner group
+// around the long (Z) axis — positive roll leans left when facing north.
+// ---------------------------------------------------------------------------
+function buildBikeBody(colour, riderColour, helmetColour) {
+  const group = new THREE.Group();
+  group.name = 'Motorbike';
+  const leanGroup = new THREE.Group();
+  group.add(leanGroup);
+  const paint = new THREE.MeshStandardMaterial({ color: colour, roughness: 0.35, metalness: 0.4 });
+  const dark = new THREE.MeshStandardMaterial({ color: 0x14161a, roughness: 0.9 });
+  const chrome = new THREE.MeshStandardMaterial({ color: 0xb9c0c9, roughness: 0.25, metalness: 0.8 });
+  const riderMat = new THREE.MeshStandardMaterial({ color: riderColour, roughness: 0.8 });
+  const helmetMat = new THREE.MeshStandardMaterial({ color: helmetColour, roughness: 0.3, metalness: 0.2 });
+  const skin = new THREE.MeshStandardMaterial({ color: 0xc98d64, roughness: 0.7 });
+
+  const addBox = (material, w, h, d, x, y, z, parent = leanGroup) => {
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), material);
+    mesh.position.set(x, y, z);
+    mesh.castShadow = true;
+    parent.add(mesh);
+    return mesh;
+  };
+
+  // Two wheels: dark cylinders turned sideways, front at -Z.
+  const wheelGeo = new THREE.CylinderGeometry(0.34, 0.34, 0.12, 16);
+  for (const wz of [-0.55, 0.55]) {
+    const wheel = new THREE.Mesh(wheelGeo, dark);
+    wheel.rotation.z = Math.PI / 2;
+    wheel.position.set(0, 0.34, wz);
+    wheel.castShadow = true;
+    leanGroup.add(wheel);
+    const hub = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.14, 0.14, 10), chrome);
+    hub.rotation.z = Math.PI / 2;
+    hub.position.set(0, 0.34, wz);
+    leanGroup.add(hub);
+  }
+  // Frame spine, fuel tank, seat and handlebar.
+  addBox(dark, 0.09, 0.09, 1.35, 0, 0.62, 0);
+  addBox(paint, 0.34, 0.22, 0.5, 0, 0.78, -0.08);
+  addBox(dark, 0.3, 0.1, 0.45, 0, 0.8, 0.38);
+  addBox(chrome, 0.56, 0.06, 0.06, 0, 0.95, -0.55);
+  // Headlight up front, taillight at the back.
+  const headMat = new THREE.MeshStandardMaterial({ color: 0xfff2c0, emissive: 0xffe9a0, emissiveIntensity: 0.7 });
+  addBox(headMat, 0.16, 0.12, 0.05, 0, 0.72, -0.62);
+  const tailMat = new THREE.MeshStandardMaterial({ color: 0xd21f2b, emissive: 0x8f1018, emissiveIntensity: 0.7 });
+  addBox(tailMat, 0.16, 0.1, 0.05, 0, 0.78, 0.62);
+
+  // The rider: leaning forward over the tank, helmet on, hands on the bar.
+  const torso = addBox(riderMat, 0.42, 0.55, 0.26, 0, 1.15, 0.08);
+  torso.rotation.x = 0.5;
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.16, 12, 10), skin);
+  head.position.set(0, 1.5, -0.14);
+  head.castShadow = true;
+  leanGroup.add(head);
+  const helmet = new THREE.Mesh(new THREE.SphereGeometry(0.19, 12, 10), helmetMat);
+  helmet.position.set(0, 1.52, -0.14);
+  helmet.castShadow = true;
+  leanGroup.add(helmet);
+  for (const side of [-1, 1]) {
+    const arm = addBox(riderMat, 0.11, 0.5, 0.12, side * 0.24, 1.28, -0.3);
+    arm.rotation.x = -0.9;
+    const leg = addBox(dark, 0.14, 0.5, 0.14, side * 0.2, 0.72, 0.18);
+    leg.rotation.x = 0.35;
+  }
+
+  return { group, leanGroup };
+}
+
+export function createMotorbike(scene, x = 0, z = 0, heading = 0, colour = 0xd21f2b) {
+  const riderColours = [0x2f7fd0, 0x37b268, 0xf2b234, 0xe87aa0, 0x8a5fbf];
+  const helmetColours = [0xf2f0e6, 0xd21f2b, 0x2f7fd0, 0xf2b234, 0x22262e];
+  const pick = Math.floor(Math.random() * riderColours.length);
+  const built = buildBikeBody(colour, riderColours[pick], helmetColours[pick]);
+  const group = built.group;
+  group.position.set(x, 0, z);
+  group.rotation.y = heading;
+  scene.add(group);
+
+  const bike = {
+    group,
+    leanGroup: built.leanGroup,
+    type: 'bike',
+    colour,
+    heading,
+    speed: 0,
+    isTraffic: true,
+    laneIndex: 0,
+    waypointIndex: 0,
+    cruiseSpeed: BIKE_CRUISE,
+    weavePhase: Math.random() * Math.PI * 2,
+    weaveClock: 0,
+    lean: 0,
+
+    get speedKmh() {
+      return Math.abs(this.speed) * 3.6;
+    },
+
+    dispose() {
+      scene.remove(group);
+    },
+  };
+  return bike;
 }
 
 // ---------------------------------------------------------------------------
@@ -280,8 +432,18 @@ export function createVehicleSystem(scene, city = {}, options = {}) {
   let player = options.player || null;
   const cars = [];
   const traffic = [];
+  const bikes = [];
   let playerCar = null;
   let spawnCursor = 0;
+
+  // Pick a car type for a fresh spawn: sport cars are rare by design, so
+  // most of the time a plain body style comes out of the cycle instead.
+  function pickSpawnType(cycleIndex, sportChance) {
+    if (Math.random() < sportChance) {
+      return SPORT_TYPES[Math.floor(Math.random() * SPORT_TYPES.length)];
+    }
+    return BODY_TYPES[cycleIndex % BODY_TYPES.length];
+  }
 
   // --- collisions ----------------------------------------------------------
 
@@ -435,10 +597,95 @@ export function createVehicleSystem(scene, city = {}, options = {}) {
     driveStep(car, dt, throttle, steer, brake, false);
   }
 
+  // --- traffic bikes ---------------------------------------------------------
+  // A bike rides the same lanes as the cars, but quicker and looser: it
+  // sways across the lane as it filters through traffic, leans into every
+  // turn, and brakes for the car ahead instead of barging through it.
+  function updateTrafficBike(bike, dt, playerPos) {
+    const lane = lanes[bike.laneIndex % lanes.length];
+    const points = lane.points;
+    const target = points[bike.waypointIndex % points.length];
+    const dx = target.x - bike.group.position.x;
+    const dz = target.z - bike.group.position.z;
+    const distToTarget = Math.hypot(dx, dz);
+    if (distToTarget < 6) {
+      bike.waypointIndex += 1;
+      if (bike.waypointIndex >= points.length) {
+        bike.laneIndex = (bike.laneIndex + 1) % lanes.length;
+        bike.waypointIndex = 0;
+      }
+      return;
+    }
+
+    // Weave: slide the aim point sideways across the lane, so the bike
+    // reads as filtering through traffic instead of glued to a rail.
+    bike.weaveClock += dt;
+    const sway = Math.sin(bike.weaveClock * BIKE_WEAVE_RATE * Math.PI + bike.weavePhase) * BIKE_WEAVE;
+    const rightX = Math.cos(bike.heading);
+    const rightZ = -Math.sin(bike.heading);
+    const aimX = target.x + rightX * sway;
+    const aimZ = target.z + rightZ * sway;
+    const desiredHeading = Math.atan2(-(aimX - bike.group.position.x), -(aimZ - bike.group.position.z));
+    const headingError = angleDifference(bike.heading, desiredHeading);
+    const steerInput = THREE.MathUtils.clamp(headingError * 1.6, -1, 1);
+
+    // Look ahead for a car (or the player on foot) to brake for.
+    const fwd = forwardOf(bike.heading);
+    let brake = false;
+    for (const other of cars) {
+      if (other.destroyed) continue;
+      const ox = other.group.position.x - bike.group.position.x;
+      const oz = other.group.position.z - bike.group.position.z;
+      const along = ox * fwd.x + oz * fwd.z;
+      const side = Math.abs(ox * -fwd.z + oz * fwd.x);
+      if (along > 0 && along < TRAFFIC_BRAKE_AHEAD && side < 3.0) {
+        brake = true;
+        break;
+      }
+    }
+    if (!brake && playerPos && player && !player.inVehicle) {
+      const px = playerPos.x - bike.group.position.x;
+      const pz = playerPos.z - bike.group.position.z;
+      const along = px * fwd.x + pz * fwd.z;
+      const side = Math.abs(px * -fwd.z + pz * fwd.x);
+      if (along > 0 && along < TRAFFIC_BRAKE_AHEAD + 3 && side < 2.5) brake = true;
+    }
+
+    // Speed: ease toward cruise, never past the bike's top speed.
+    const cruise = Math.min(bike.cruiseSpeed, BIKE_TOP_SPEED);
+    if (brake) bike.speed = Math.max(0, bike.speed - 18 * dt);
+    else if (bike.speed < cruise) bike.speed = Math.min(cruise, bike.speed + BIKE_ACCEL * dt);
+    else bike.speed = Math.max(cruise, bike.speed - 6 * dt);
+
+    // Steering bites harder at low speed; the heading follows the aim.
+    const speedFactor = Math.min(1, Math.abs(bike.speed) / 12);
+    const turnRate = 2.4 * (0.5 + 0.5 * (1 - speedFactor * 0.5));
+    bike.heading += THREE.MathUtils.clamp(headingError, -turnRate * dt, turnRate * dt);
+
+    // Move along the NEW heading, not the one the brake check just read.
+    const moveFwd = forwardOf(bike.heading);
+    const nx = bike.group.position.x + moveFwd.x * bike.speed * dt;
+    const nz = bike.group.position.z + moveFwd.z * bike.speed * dt;
+    if (nx < bounds.minX || nx > bounds.maxX || nz < bounds.minZ || nz > bounds.maxZ) {
+      bike.speed *= 0.4;
+      return;
+    }
+    bike.group.position.x = nx;
+    bike.group.position.z = nz;
+    bike.group.rotation.y = bike.heading;
+
+    // Lean into the turn: steering left rolls the bike left, and the other
+    // way for a right-hander. Smoothed so it banks instead of snapping.
+    const leanTarget = THREE.MathUtils.clamp(steerInput * 0.42, -0.45, 0.45);
+    bike.lean += (leanTarget - bike.lean) * Math.min(1, dt * 6);
+    bike.leanGroup.rotation.z = bike.lean;
+  }
+
   // --- the system object ----------------------------------------------------
   const system = {
     cars,
     traffic,
+    bikes,
     get playerCar() {
       return playerCar;
     },
@@ -452,11 +699,54 @@ export function createVehicleSystem(scene, city = {}, options = {}) {
       for (let i = 0; i < count; i += 1) {
         const spot = carSpawns[spawnCursor % carSpawns.length];
         spawnCursor += 1;
-        const type = BODY_TYPES[(spawnCursor + i) % BODY_TYPES.length];
+        const type = pickSpawnType(spawnCursor + i, SPORT_PARKED_CHANCE);
         const colour = PAINT_COLORS[(spawnCursor * 3 + i) % PAINT_COLORS.length];
         const car = createCar(scene, type, colour, spot.x, spot.z, spot.heading);
         cars.push(car);
         made.push(car);
+      }
+      return made;
+    },
+
+    // Put one specific car at an exact spot (shot staging uses this to
+    // guarantee a sport car in the frame). Not traffic, not the player's.
+    spawnCarAt(type, colour, x, z, heading = 0) {
+      const car = createCar(scene, type, colour, x, z, heading);
+      cars.push(car);
+      return car;
+    },
+
+    // Put one motorbike at an exact spot (shot staging uses this).
+    spawnBikeAt(x, z, heading = 0, colour = 0xd21f2b) {
+      const bike = createMotorbike(scene, x, z, heading, colour);
+      bikes.push(bike);
+      return bike;
+    },
+
+    // Scatter motorbikes through traffic: same lanes as the cars, faster
+    // cruise, each with its own weave phase so they do not move in step.
+    spawnBikes(count = BIKE_COUNT) {
+      const made = [];
+      for (let i = 0; i < count; i += 1) {
+        const laneIndex = (bikes.length + i * 3) % lanes.length;
+        const lane = lanes[laneIndex];
+        const segIndex = Math.floor(Math.random() * (lane.points.length - 1));
+        const segA = lane.points[segIndex];
+        const segB = lane.points[segIndex + 1];
+        const segT = Math.random();
+        const point = {
+          x: segA.x + (segB.x - segA.x) * segT,
+          z: segA.z + (segB.z - segA.z) * segT,
+        };
+        const nextPoint = lane.points[(segIndex + 1) % lane.points.length];
+        const heading = Math.atan2(-(nextPoint.x - point.x), -(nextPoint.z - point.z));
+        const colour = PAINT_COLORS[(i * 3 + 1) % PAINT_COLORS.length];
+        const bike = createMotorbike(scene, point.x, point.z, heading, colour);
+        bike.laneIndex = laneIndex;
+        bike.waypointIndex = (segIndex + 1) % lane.points.length;
+        bike.cruiseSpeed = BIKE_CRUISE * (0.9 + Math.random() * 0.25);
+        bikes.push(bike);
+        made.push(bike);
       }
       return made;
     },
@@ -477,7 +767,7 @@ export function createVehicleSystem(scene, city = {}, options = {}) {
           z: segA.z + (segB.z - segA.z) * segT,
         };
         const pointIndex = segIndex;
-        const type = BODY_TYPES[(i * 2 + 1) % BODY_TYPES.length];
+        const type = pickSpawnType(i * 2 + 1, SPORT_TRAFFIC_CHANCE);
         const colour = PAINT_COLORS[(i * 5 + 2) % PAINT_COLORS.length];
         // Face along the lane from the point the car actually spawns on,
         // toward the next waypoint it will drive to.
@@ -620,12 +910,37 @@ export function createVehicleSystem(scene, city = {}, options = {}) {
           }
         }
       }
+      // --- motorbikes ------------------------------------------------------
+      // Bikes ride the same streets as the cars, quicker and looser.
+      // They are never enterable, so nothing here can steal or drive one.
+      for (let i = bikes.length - 1; i >= 0; i -= 1) {
+        const bike = bikes[i];
+        updateTrafficBike(bike, dt, playerPos);
+        // Recycle a bike that drifted far from the player back onto a lane
+        // near the action, so the streets never run out of bikes.
+        if (playerPos) {
+          const dist = Math.hypot(
+            bike.group.position.x - playerPos.x,
+            bike.group.position.z - playerPos.z,
+          );
+          if (dist > TRAFFIC_DESPAWN) {
+            const lane = lanes[(bike.laneIndex + 1) % lanes.length];
+            const point = lane.points[0];
+            bike.group.position.set(point.x, 0, point.z);
+            bike.laneIndex = (bike.laneIndex + 1) % lanes.length;
+            bike.waypointIndex = 1;
+            bike.speed = 0;
+          }
+        }
+      }
     },
 
     dispose() {
       for (const car of cars) car.dispose();
+      for (const bike of bikes) bike.dispose();
       cars.length = 0;
       traffic.length = 0;
+      bikes.length = 0;
       playerCar = null;
     },
   };
