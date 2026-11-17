@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Solmar Bay — A Marisol Bay Story</title>
+<style>
+  :root {
+    --gold: #ffc93c;
+    --teal: #1f7a6d;
+    --ink: #101820;
+    --panel: rgba(12, 20, 28, 0.72);
+    --panel-soft: rgba(12, 20, 28, 0.55);
+    --line: rgba(255, 255, 255, 0.22);
+    --good: #7ed07a;
+    --bad: #ff5a4e;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #0e1620;
+    font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif; color: #f4f1e8; }
+  #game-root { position: fixed; inset: 0; }
+  #game-root canvas { display: block; width: 100%; height: 100%; }
+
+  /* ---------- HUD ---------- */
+  #hud { position: fixed; inset: 0; pointer-events: none; z-index: 5; display: none; }
+  #hud.visible { display: block; }
+  .hud-panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 8px 12px; backdrop-filter: blur(2px); }
+
+  #hud-top-right { position: absolute; top: 14px; right: 14px; display: flex;
+    flex-direction: column; align-items: flex-end; gap: 8px; }
+  #hud-cash { font-size: 26px; font-weight: 800; color: var(--gold); letter-spacing: 0.5px;
+    text-shadow: 0 2px 6px rgba(0,0,0,0.6); }
+  #hud-wanted { font-size: 26px; letter-spacing: 4px; color: var(--gold);
+    text-shadow: 0 0 10px rgba(255, 180, 40, 0.7), 0 2px 6px rgba(0,0,0,0.6); min-height: 32px; }
+  #hud-wanted .star-off { color: rgba(255,255,255,0.28); text-shadow: none; }
+  #hud-clock { font-size: 15px; font-weight: 700; color: #dfe9f2; }
+
+  #hud-bottom-left { position: absolute; left: 14px; bottom: 14px; width: 250px; }
+  #hud-health-label { font-size: 11px; font-weight: 700; letter-spacing: 2px; color: #cfe0d8; }
+  #hud-health-bar-wrap { height: 12px; background: rgba(0,0,0,0.55); border: 1px solid var(--line);
+    border-radius: 6px; overflow: hidden; margin-top: 4px; }
+  #hud-health-bar { height: 100%; width: 100%; background: linear-gradient(90deg, #37b268, #7ed07a);
+    transition: width 0.2s ease; }
+  #hud-health-bar.low { background: linear-gradient(90deg, #d21f2b, #ff5a4e); }
+  #hud-weapon { margin-top: 8px; font-size: 15px; font-weight: 700; color: #f4f1e8; }
+  #hud-weapon .ammo { color: var(--gold); font-weight: 800; }
+  #hud-speed { margin-top: 4px; font-size: 22px; font-weight: 800; color: #fff; }
+  #hud-speed .unit { font-size: 12px; font-weight: 600; color: #cfe0d8; }
+
+  #hud-objective { position: absolute; top: 14px; left: 14px; max-width: 380px; }
+  #hud-objective-title { font-size: 13px; font-weight: 800; letter-spacing: 2px;
+    color: var(--gold); text-transform: uppercase; }
+  #hud-objective-text { font-size: 16px; font-weight: 600; line-height: 1.35; margin-top: 3px; }
+  #hud-objective-step { font-size: 12px; color: #cfe0d8; margin-top: 3px; }
+  #hud-objective-dialogue { font-size: 13px; font-style: italic; color: #ffe9a8; margin-top: 5px; }
+
+  #hud-minimap-wrap { position: absolute; right: 14px; bottom: 14px; }
+  #minimap { display: block; width: 190px; height: 190px; border-radius: 50%;
+    border: 3px solid rgba(255,255,255,0.35); box-shadow: 0 4px 18px rgba(0,0,0,0.55);
+    background: #16222e; }
+  #hud-minimap-label { text-align: center; font-size: 11px; font-weight: 700;
+    letter-spacing: 2px; color: #cfe0d8; margin-top: 4px; }
+
+  #hud-notify { position: absolute; left: 50%; bottom: 110px; transform: translateX(-50%);
+    max-width: 560px; text-align: center; }
+  #hud-notify-text { display: inline-block; background: var(--panel); border: 1px solid var(--line);
+    border-radius: 8px; padding: 8px 16px; font-size: 16px; font-weight: 700; }
+  #hud-notify-text:empty { display: none; }
+
+  #hud-prompt { position: absolute; left: 50%; bottom: 190px; transform: translateX(-50%);
+    font-size: 16px; font-weight: 700; background: var(--panel-soft); border: 1px solid var(--line);
+    border-radius: 8px; padding: 7px 14px; }
+  #hud-prompt:empty { display: none; }
+  #hud-prompt b { color: var(--gold); }
+
+  #crosshair { position: absolute; left: 50%; top: 50%; width: 22px; height: 22px;
+    transform: translate(-50%, -50%); display: none; }
+  #crosshair::before, #crosshair::after { content: ""; position: absolute; background: #fff;
+    box-shadow: 0 0 4px rgba(0,0,0,0.8); }
+  #crosshair::before { left: 10px; top: 0; width: 2px; height: 22px; }
+  #crosshair::after { left: 0; top: 10px; width: 22px; height: 2px; }
+  #crosshair.visible { display: block; }
+
+  #hud-toast { position: absolute; left: 50%; top: 84px; transform: translateX(-50%);
+    font-size: 15px; font-weight: 700; color: #ffe9a8; text-shadow: 0 2px 6px rgba(0,0,0,0.7); }
+
+  /* ---------- Overlays ---------- */
+  .overlay { position: fixed; inset: 0; z-index: 10; display: flex; align-items: center;
+    justify-content: center; background: linear-gradient(180deg, rgba(10,18,28,0.55), rgba(10,18,28,0.82));
+    backdrop-filter: blur(3px); }
+  .overlay.hidden { display: none; }
+  .overlay-card { width: min(620px, 92vw); max-height: 92vh; overflow-y: auto;
+    background: rgba(14, 24, 34, 0.92); border: 1px solid var(--line); border-radius: 16px;
+    padding: 28px 30px; box-shadow: 0 18px 60px rgba(0,0,0,0.6); }
+  .overlay-card h1 { font-size: 44px; letter-spacing: 3px; color: var(--gold);
+    text-shadow: 0 3px 0 rgba(0,0,0,0.35); }
+  .overlay-card h2 { font-size: 26px; color: var(--gold); margin-bottom: 8px; }
+  .overlay-card .subtitle { font-size: 15px; letter-spacing: 3px; text-transform: uppercase;
+    color: #9fd8cb; margin-top: 2px; }
+  .overlay-card p { font-size: 15px; line-height: 1.55; color: #e8e4d8; margin-top: 12px; }
+  .overlay-card .story { font-style: italic; color: #ffe9a8; }
+  .controls-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 18px; margin-top: 14px;
+    font-size: 14px; }
+  .controls-grid div { padding: 3px 0; }
+  .controls-grid b { color: var(--gold); display: inline-block; min-width: 92px; }
+  .btn-row { display: flex; gap: 12px; margin-top: 22px; flex-wrap: wrap; }
+  button { pointer-events: auto; cursor: pointer; font-size: 16px; font-weight: 800;
+    letter-spacing: 1px; color: var(--ink); background: var(--gold); border: none;
+    border-radius: 10px; padding: 12px 22px; }
+  button:hover { filter: brightness(1.08); }
+  button.secondary { background: transparent; color: #f4f1e8; border: 2px solid var(--gold); }
+  button:disabled { opacity: 0.45; cursor: default; }
+  .save-note { margin-top: 14px; font-size: 13px; color: #b9c6cf; }
+
+  #phone-list { margin-top: 14px; display: flex; flex-direction: column; gap: 10px; }
+  .mission-row { display: flex; align-items: center; gap: 12px; background: rgba(255,255,255,0.06);
+    border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; text-align: left;
+    width: 100%; color: #f4f1e8; }
+  .mission-row:hover:not(:disabled) { background: rgba(255,201,60,0.16); }
+  .mission-row .m-title { font-size: 16px; font-weight: 800; }
+  .mission-row .m-brief { font-size: 13px; color: #cfe0d8; margin-top: 2px; line-height: 1.4; }
+  .mission-row .m-reward { margin-left: auto; font-size: 16px; font-weight: 800; color: var(--gold);
+    white-space: nowrap; }
+  .mission-row .m-status { font-size: 11px; font-weight: 800; letter-spacing: 1px;
+    text-transform: uppercase; padding: 3px 8px; border-radius: 6px; background: #2a3a48; }
+  .mission-row .m-status.done { background: #2e6b34; color: #bff0c0; }
+  .mission-row .m-status.active { background: #8a6d1f; color: #ffe9a8; }
+  .mission-row:disabled { opacity: 0.55; cursor: default; }
+  #phone-cash { font-size: 18px; font-weight: 800; color: var(--gold); margin-top: 10px; }
+
+  #end-title { font-size: 40px; }
+  #loading-note { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    z-index: 3; font-size: 16px; font-weight: 700; color: #ffe9a8;
+    text-shadow: 0 2px 8px rgba(0,0,0,0.8); }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "./vendor/three/three.module.min.js"
+  }
+}
+</script>
+</head>
+<body>
+<div id="game-root"></div>
+<div id="loading-note">Loading Solmar Bay…</div>
+
+<!-- In-game HUD -->
+<div id="hud" aria-live="polite">
+  <div id="hud-objective" class="hud-panel">
+    <div id="hud-objective-title">Free roam</div>
+    <div id="hud-objective-text">Explore Marisol Bay — or open the phone (P) to start a mission.</div>
+    <div id="hud-objective-step"></div>
+    <div id="hud-objective-dialogue"></div>
+  </div>
+  <div id="hud-top-right">
+    <div id="hud-cash">$120</div>
+    <div id="hud-wanted" title="Wanted level"></div>
+    <div id="hud-clock" class="hud-panel">17:40</div>
+  </div>
+  <div id="hud-bottom-left">
+    <div id="hud-health-label">HEALTH</div>
+    <div id="hud-health-bar-wrap"><div id="hud-health-bar"></div></div>
+    <div id="hud-weapon">Fists</div>
+    <div id="hud-speed">0 <span class="unit">km/h</span></div>
+  </div>
+  <div id="hud-minimap-wrap">
+    <canvas id="minimap" width="190" height="190"></canvas>
+    <div id="hud-minimap-label">MARISOL BAY</div>
+  </div>
+  <div id="hud-notify"><span id="hud-notify-text"></span></div>
+  <div id="hud-prompt"></div>
+  <div id="hud-toast"></div>
+  <div id="crosshair"></div>
+</div>
+
+<!-- Start menu -->
+<div id="menu-overlay" class="overlay">
+  <div class="overlay-card">
+    <h1>SOLMAR BAY</h1>
+    <div class="subtitle">A Marisol Bay Story</div>
+    <p class="story">Golden hour over the bay. Leo Marlow came to Marisol Bay to drive a taxi —
+      instead the Marisol crew handed him a getaway car, a package, and a city full of
+      patrol cars. Drive it, steal it, lose the heat, and pull off the big score.</p>
+    <p>Explore the city on foot or behind the wheel. Steal cars, dodge patrols, fight
+      back when cornered, and work through five story missions for the crew. Your cash
+      and mission progress save automatically.</p>
+    <div class="controls-grid">
+      <div><b>W A S D</b> Move / drive</div>
+      <div><b>Shift</b> Run</div>
+      <div><b>Space</b> Brake / handbrake</div>
+      <div><b>E</b> Enter / exit car</div>
+      <div><b>F</b> Steal car / interact</div>
+      <div><b>Mouse + Click</b> Aim / shoot</div>
+      <div><b>1 / 2</b> Fists / pistol</div>
+      <div><b>R</b> Reload</div>
+      <div><b>P</b> Phone (missions)</div>
+      <div><b>Esc</b> Pause</div>
+      <div><b>M</b> Mute sound</div>
+    </div>
+    <p class="save-note">Click the game once it starts to capture the mouse for aiming. Sound starts on your first click or key press.</p>
+    <div class="btn-row">
+      <button id="btn-continue">Continue</button>
+      <button id="btn-new-game" class="secondary">New Game</button>
+    </div>
+    <div id="menu-save-note" class="save-note"></div>
+  </div>
+</div>
+
+<!-- Pause -->
+<div id="pause-overlay" class="overlay hidden">
+  <div class="overlay-card">
+    <h2>Paused</h2>
+    <p>Take a breath, Leo. The bay will wait.</p>
+    <div class="btn-row">
+      <button id="btn-resume">Resume</button>
+      <button id="btn-quit-to-menu" class="secondary">Save &amp; Menu</button>
+    </div>
+  </div>
+</div>
+
+<!-- Phone / mission menu -->
+<div id="phone-overlay" class="overlay hidden">
+  <div class="overlay-card">
+    <h2>Phone — Marisol Crew</h2>
+    <p>Pick a job. The first unfinished mission is open; finish it to unlock the next.</p>
+    <div id="phone-cash"></div>
+    <div id="phone-list"></div>
+    <div class="btn-row">
+      <button id="btn-close-phone" class="secondary">Close (P)</button>
+    </div>
+  </div>
+</div>
+
+<!-- Busted / wasted / mission complete -->
+<div id="end-overlay" class="overlay hidden">
+  <div class="overlay-card">
+    <h2 id="end-title">Busted</h2>
+    <p id="end-text"></p>
+    <div class="btn-row">
+      <button id="btn-end-continue">Keep Going</button>
+    </div>
+  </div>
+</div>
+
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>
