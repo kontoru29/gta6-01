@@ -15,6 +15,12 @@
 // Without &cam the default camera is used (normal driving camera for
 // drive, reverse angle for chase).
 //
+// Every shot is staged at sunset: applyShotStaging warms the light
+// (deeper orange sun, peach sky, warm fog, glowing lamps) so the
+// colourful buildings, the palms and the neon signs glow the way a
+// beachfront evening should. Normal play keeps the standard golden-hour
+// light; only the staged screenshots get the extra warmth.
+//
 // The four shots, each showing several systems at once:
 //   cover   — Leo on foot at golden hour: HUD, minimap, mission objective,
 //             traffic, pedestrians, a car waiting to be stolen, plus a
@@ -35,6 +41,7 @@
 // Positions are fixed constants, jittered only by the seeded RNG, so the
 // same seed always stages the same frame.
 
+import * as THREE from 'three';
 import { createRng, seedFromString } from './utils.js';
 
 export const SHOT_NAMES = ['cover', 'drive', 'chase', 'mission'];
@@ -61,8 +68,74 @@ export function readShotParams() {
   }
 }
 
-// Move one entity (car, bike, walker, police unit) to a fixed spot.
-function poseEntity(entity, x, z, heading, speed) {
+// Warm the whole scene toward sunset: a deeper orange sun, a peach-pink
+// sky and warm fog, with a warmer hemisphere fill and the street lamps
+// turned up so they glow. Best-effort and guarded — a failure here must
+// never stop the shot from staging.
+function warmSunsetLight(game) {
+  try {
+    const world = game && game.world;
+    if (!world || !world.group) return;
+    const scene = world.group.parent;
+    if (!scene) return;
+    const sky = 0xee8f6b;
+    const fogColour = 0xf0a878;
+    const sunColour = 0xff8a3d;
+    const skyFill = 0xf2b48a;
+    const groundFill = 0xd9985e;
+    if (scene.background && scene.background.isColor) {
+      scene.background.set(sky);
+    } else {
+      scene.background = new THREE.Color(sky);
+    }
+    if (scene.fog && scene.fog.color) {
+      scene.fog.color.set(fogColour);
+    }
+    const lights = world.lights || {};
+    if (lights.sun) {
+      lights.sun.color.set(sunColour);
+      lights.sun.intensity = 3.0;
+    }
+    if (lights.hemi) {
+      lights.hemi.color.set(skyFill);
+      lights.hemi.groundColor.set(groundFill);
+      lights.hemi.intensity = 0.9;
+    }
+    // Fallback when the world does not expose its lights: walk the scene
+    // and warm the first sun and sky fill found.
+    if (!lights.sun || !lights.hemi) {
+      scene.traverse((obj) => {
+        if (!lights.sun && obj.isDirectionalLight) {
+          obj.color.set(sunColour);
+          obj.intensity = 3.0;
+        }
+        if (!lights.hemi && obj.isHemisphereLight) {
+          obj.color.set(skyFill);
+          obj.groundColor.set(groundFill);
+          obj.intensity = 0.9;
+        }
+      });
+    }
+    // Street lamps: any mesh whose material already glows warm (the lamp
+    // heads) gets its emissive turned up, so the lamps read as lit
+    // against the sunset. Anything else is left alone.
+    scene.traverse((obj) => {
+      if (!obj.isMesh || !obj.material || !obj.material.emissive) return;
+      const glow = obj.material.emissive;
+      if (glow.r > glow.b + 0.2 && glow.r >= glow.g) {
+        obj.material.emissiveIntensity = Math.max(
+          obj.material.emissiveIntensity || 0,
+          2.6,
+        );
+      }
+    });
+  } catch {
+    // Sunset is cosmetic; a miss just leaves the standard golden hour.
+  }
+}
+
+// Put one entity (car, bike, walker, police unit) on a fixed spot.
+function place(entity, x, z, heading, speed) {
   if (!entity) return null;
   entity.group.position.set(x, 0, z);
   entity.heading = heading;
@@ -71,32 +144,32 @@ function poseEntity(entity, x, z, heading, speed) {
   return entity;
 }
 
-// Place the first few traffic cars on the given spots.
-function placeTrafficNear(game, spots) {
+// Spread the first few traffic cars over the given spots.
+function spreadTraffic(game, spots) {
   const traffic = game.vehicles.traffic || [];
   spots.slice(0, traffic.length).forEach((spot, i) => {
-    poseEntity(traffic[i], spot.x, spot.z, spot.heading, spot.speed || 0);
+    place(traffic[i], spot.x, spot.z, spot.heading, spot.speed || 0);
   });
 }
 
-function placePedestriansNear(game, spots) {
+function spreadWalkers(game, spots) {
   const walkers = game.pedestrians.pedestrians || [];
   spots.slice(0, walkers.length).forEach((spot, i) => {
     const ped = walkers[i];
-    poseEntity(ped, spot.x, spot.z, spot.heading, 0);
+    place(ped, spot.x, spot.z, spot.heading, 0);
     ped.state = 'walking';
     ped.panic = 0;
   });
 }
 
 // Put one parked car where the camera can see it, ready to be stolen.
-function placeStealableCar(game, x, z, heading) {
+function parkStealable(game, x, z, heading) {
   const parked = (game.vehicles.cars || []).filter((c) => !c.isTraffic && !c.isPlayer);
   const car = parked[0] || (game.vehicles.cars || [])[0];
-  return poseEntity(car, x, z, heading, 0);
+  return place(car, x, z, heading, 0);
 }
 
-function startMissionIfFree(game, id) {
+function openMission(game, id) {
   try {
     if (game.missions.getActiveMission()) return;
     game.missions.startMission(id);
@@ -114,23 +187,23 @@ function stageCover(game, rng) {
   game.player.setPosition(6, 10, 0.15);
   game.setCash(120);
   game.police.setWantedLevel(0);
-  startMissionIfFree(game, 'first-fare');
-  placeStealableCar(game, 12.5, -2, Math.PI / 2);
+  openMission(game, 'first-fare');
+  parkStealable(game, 12.5, -2, Math.PI / 2);
   // A blue roadster parked at the far kerb, and a motorbike filtering
   // down the avenue toward the camera, so the cover shows the new rides.
   try {
     game.vehicles.spawnCarAt('roadster', 0x2f7fd0, -12.5, -6, Math.PI / 2);
-    poseEntity(game.vehicles.spawnBikeAt(3.5, -26, Math.PI), 3.5, -26, Math.PI, 12);
+    place(game.vehicles.spawnBikeAt(3.5, -26, Math.PI), 3.5, -26, Math.PI, 12);
   } catch {
     // Staging extras are optional; the shot still works without them.
   }
-  placeTrafficNear(game, [
+  spreadTraffic(game, [
     { x: -3.5, z: -30, heading: 0, speed: 10 },
     { x: 3.5, z: 28, heading: Math.PI, speed: 9 },
     { x: -3.5, z: 48, heading: 0, speed: 11 },
     { x: -56.5, z: 3.5, heading: Math.PI / 2, speed: 8 },
   ]);
-  placePedestriansNear(game, [
+  spreadWalkers(game, [
     { x: 9.5, z: -6, heading: 2.4 },
     { x: -9.5, z: 16, heading: -1.2 },
     { x: 10.5, z: 26, heading: 0.6 },
@@ -153,21 +226,21 @@ function stageDrive(game, rng, cam) {
   }
   game.police.setWantedLevel(1);
   game.setCash(350);
-  startMissionIfFree(game, 'first-fare');
+  openMission(game, 'first-fare');
   // A motorbike in the oncoming lane, closing on Leo as he drives north.
   try {
-    poseEntity(game.vehicles.spawnBikeAt(3.5, 16, Math.PI), 3.5, 16, Math.PI, 14);
+    place(game.vehicles.spawnBikeAt(3.5, 16, Math.PI), 3.5, 16, Math.PI, 14);
   } catch {
     // Staging extras are optional; the shot still works without them.
   }
-  placeTrafficNear(game, [
+  spreadTraffic(game, [
     { x: -3.5, z: 6, heading: 0, speed: 11 },
     { x: 3.5, z: -18, heading: Math.PI, speed: 10 },
     { x: -3.5, z: -44, heading: 0, speed: 12 },
     { x: 3.5, z: 78, heading: Math.PI, speed: 9 },
     { x: -56.5, z: 42.5, heading: Math.PI / 2, speed: 8 },
   ]);
-  placePedestriansNear(game, [
+  spreadWalkers(game, [
     { x: 9.5, z: 20, heading: 1.1 },
     { x: -9.5, z: 60, heading: -2.0 },
   ]);
@@ -206,7 +279,7 @@ function stageChase(game, rng, cam) {
   ];
   for (const spot of pack) {
     try {
-      poseEntity(game.police.spawnAt(spot, 'car'), spot.x, spot.z, Math.PI, 20);
+      place(game.police.spawnAt(spot, 'car'), spot.x, spot.z, Math.PI, 20);
     } catch {
       // One missing patrol car must not sink the shot.
     }
@@ -216,14 +289,14 @@ function stageChase(game, rng, cam) {
   // shot's proof the bikes are in the game.
   // Staged before the wanted level for the same reason as the cars.
   try {
-    poseEntity(game.police.spawnAt({ x: 0.5, z: 68 }, 'bike'), 0.5, 68, Math.PI, 24);
+    place(game.police.spawnAt({ x: 0.5, z: 68 }, 'bike'), 0.5, 68, Math.PI, 24);
   } catch {
     // The shot still works without the bike in frame.
   }
   game.police.setWantedLevel(3);
   game.setCash(820);
-  startMissionIfFree(game, 'first-fare');
-  placeTrafficNear(game, [
+  openMission(game, 'first-fare');
+  spreadTraffic(game, [
     { x: -3.5, z: 8, heading: 0, speed: 11 },
     { x: 3.5, z: -30, heading: Math.PI, speed: 10 },
   ]);
@@ -240,15 +313,15 @@ function stageMission(game, rng) {
   // the start of the story, so it is the one this shot stages.
   game.setCash(2450);
   game.police.setWantedLevel(2);
-  startMissionIfFree(game, 'first-fare');
+  openMission(game, 'first-fare');
   game.player.setPosition(-112, -46, -0.5);
   try {
     game.combat.equipWeapon('pistol');
   } catch {
     // Pistol is cosmetic for the frame; never fail the shot over it.
   }
-  placeStealableCar(game, -108.5, -58, Math.PI / 2);
-  placeTrafficNear(game, [
+  parkStealable(game, -108.5, -58, Math.PI / 2);
+  spreadTraffic(game, [
     { x: -123.5, z: -80, heading: Math.PI, speed: 9 },
     { x: -116.5, z: -16, heading: 0, speed: 10 },
   ]);
@@ -257,17 +330,17 @@ function stageMission(game, rng) {
   // the staging frame catches it exactly where it was placed instead of
   // drifting off down a lane before the shutter.
   try {
-    const bike = poseEntity(game.vehicles.spawnBikeAt(-114, -54, 0), -114, -54, 0, 0);
+    const bike = place(game.vehicles.spawnBikeAt(-114, -54, 0), -114, -54, 0, 0);
     if (bike) bike.cruiseSpeed = 0;
   } catch {
     // Staging extras are optional; the shot still works without them.
   }
-  placePedestriansNear(game, [
+  spreadWalkers(game, [
     { x: -128, z: -42, heading: 2.2 },
     { x: -106, z: -38, heading: -1.4 },
   ]);
   try {
-    poseEntity(game.police.spawnAt({ x: -118, z: -56 }, 'officer'), -118, -56, Math.PI, 0);
+    place(game.police.spawnAt({ x: -118, z: -56 }, 'officer'), -118, -56, Math.PI, 0);
   } catch {
     // The shot still works without the officer in frame.
   }
@@ -288,6 +361,7 @@ export function applyShotStaging(game, shotName, seed, cam) {
   if (!stager || !game) return false;
   const rng = createRng((seed || 1) * 7919 + seedFromString(shotName));
   try {
+    warmSunsetLight(game);
     stager(game, rng, cam || null);
   } catch (err) {
     // Staging is best-effort: report it, keep the plain game running.

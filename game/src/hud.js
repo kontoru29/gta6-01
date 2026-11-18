@@ -1,35 +1,344 @@
-// hud.js — Solmar Bay on-screen readouts and the top-down minimap.
+// hud.js — Solmar Bay screen readouts and the round minimap.
 //
-// This module owns every pixel of the HUD and nothing else: it never moves
-// the player, never changes the wanted level, never pays cash. main.js hands
-// it a plain snapshot each frame (health, cash, stars, speed, weapon, the
-// current objective, positions for the minimap) and this module paints it.
-// The minimap is a round 2D canvas: roads as pale strips, the player as a
+// Everything on screen that is not the 3D world lives here: the cash
+// total, the wanted stars, the clock, the health bar, the current weapon
+// and ammo, the speedometer, the mission objective card, the little
+// banner and toast lines, and the circular minimap. The module is
+// deliberately dumb: main.js hands it a plain snapshot every frame and it
+// paints it. It never moves the player, never changes the wanted level,
+// never spends money.
+//
+// The minimap is a top-down sketch of Marisol Bay on a 2D canvas: the
+// ocean and beach on the west edge, the promenade, the city blocks (green
+// parks, the plaza fountain, the police station, the ferris-wheel
+// landmark, ordinary blocks with building footprints), roads with dashed
+// centrelines, district names, and the live markers on top — Leo as a
 // white arrow, traffic as grey dots, police as blue dots, cash pickups as
-// small gold dots, and the active mission marker as a pulsing gold diamond.
+// gold dots, and the mission objective as a pulsing gold diamond.
 
 import { formatMoney, formatClock, formatSpeedKmh, clamp } from './utils.js';
 import { CITY, MINIMAP } from './config.js';
 
-// Minimap colours, as canvas fill strings (config keeps numbers for 3D).
-const MAP_BG = '#16222e';
-const MAP_ROAD = '#4a545e';
-const MAP_ROAD_EDGE = '#5f6b76';
-const MAP_SAND = '#c9a86a';
-const MAP_WATER = '#1d5a74';
-const MAP_BLOCK = '#232d38';
-const MAP_PLAYER = '#ffffff';
-const MAP_TRAFFIC = '#c8ccd2';
-const MAP_POLICE = '#4f9dff';
-const MAP_MISSION = '#ffd23c';
-const MAP_PICKUP = '#ffcf5e';
+// --- palette ---------------------------------------------------------------
+// Canvas colour strings. The numeric versions for the 3D scene live in
+// config.js; these are the 2D twins.
+const INK = '#101820';
+const PALETTE = {
+  bg: '#16222e',
+  road: '#4a545e',
+  roadEdge: '#5f6b76',
+  roadDash: '#8a94a0',
+  sand: '#c9a86a',
+  water: '#1d5a74',
+  wave: '#7fb8d9',
+  block: '#232d38',
+  footprintA: '#31404e',
+  footprintB: '#3a3f45',
+  footprintC: '#4a3a30',
+  park: '#3f7a3a',
+  parkTree: '#6fae4f',
+  plaza: '#b8b0a0',
+  station: '#7fa8c8',
+  landmark: '#c96f4a',
+  promenade: '#5f6b76',
+  player: '#ffffff',
+  traffic: '#c8ccd2',
+  police: '#4f9dff',
+  mission: '#ffd23c',
+  pickup: '#ffcf5e',
+  ring: '#e8e4d8',
+};
 
+// District names in world coordinates, for the minimap labels.
+const DISTRICTS = [
+  { x: -248, z: 0, name: 'BEACH' },
+  { x: 60, z: -60, name: 'DOWNTOWN' },
+  { x: -120, z: 60, name: 'MERCADO' },
+  { x: -180, z: -180, name: 'CORAL SHORE' },
+];
+// The ferris wheel landmark, in world coordinates.
+const WHEEL = { x: 0, z: -215 };
+
+// The fixed city grid, so the minimap can draw blocks, parks and the
+// plaza without any extra data from main.js.
+const BLOCK_AXES = [-150, -90, -30, 30, 90, 150];
+
+function blockType(bx, bz) {
+  if ((bx === -30 && bz === 30) || (bx === 90 && bz === -90)) return 'park';
+  if (bx === 30 && bz === 30) return 'plaza';
+  if (bx === -90 && bz === 150) return 'station';
+  if (bx === -30 && bz === 150) return 'landmark';
+  return 'normal';
+}
+
+// A stable 0..1 value for a block, from its coordinates, so neighbouring
+// blocks get different footprint shades without any stored state.
+function blockSeed(bx, bz) {
+  const raw = Math.abs(Math.sin(bx * 12.9898 + bz * 78.233) * 43758.5453);
+  return raw - Math.floor(raw);
+}
+
+// A row of five stars, filled up to the current wanted level.
 function starRow(stars, maxStars) {
-  let out = '';
+  let row = '';
   for (let i = 0; i < maxStars; i += 1) {
-    out += i < stars ? '★' : '<span class="star-off">★</span>';
+    row += i < stars ? '★' : '<span class="star-off">★</span>';
   }
-  return out;
+  return row;
+}
+
+// --- minimap paint helpers -------------------------------------------------
+// Each paints one layer onto `ctx`. `g` carries the shared geometry:
+// { ctx, half, scale, toX, toY } where toX/toY turn world coordinates
+// into canvas pixels centred on the player.
+
+function paintSeaAndSand(g, map) {
+  const { ctx, half, scale, toX, toY } = g;
+  const size = half * 2;
+  const sandX = toX(CITY.beachStartX);
+  const waterEdgeX = toX(CITY.beachEndX);
+  ctx.fillStyle = PALETTE.water;
+  ctx.fillRect(0, 0, Math.max(0, waterEdgeX), size);
+  ctx.fillStyle = PALETTE.sand;
+  ctx.fillRect(Math.max(0, waterEdgeX), 0, Math.max(0, sandX - waterEdgeX), size);
+  // A pale line where the water meets the beach.
+  ctx.strokeStyle = PALETTE.wave;
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(waterEdgeX, 0);
+  ctx.lineTo(waterEdgeX, size);
+  ctx.stroke();
+  void map;
+  void toY;
+}
+
+function paintPromenade(g) {
+  const { ctx, scale, toX, toY } = g;
+  // The beachfront promenade: a pale strip just east of the sand.
+  const promX = toX(-228);
+  ctx.strokeStyle = PALETTE.promenade;
+  ctx.lineWidth = Math.max(2, 10 * scale);
+  ctx.beginPath();
+  ctx.moveTo(promX, toY(-CITY.halfSize));
+  ctx.lineTo(promX, toY(CITY.halfSize));
+  ctx.stroke();
+  // A row of tiny palm dots along the promenade.
+  ctx.fillStyle = PALETTE.parkTree;
+  for (let z = -220; z <= 220; z += 20) {
+    ctx.beginPath();
+    ctx.arc(toX(-232), toY(z), 1.6, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function paintOneBlock(g, bx, bz) {
+  const { ctx, scale, toX, toY } = g;
+  const kind = blockType(bx, bz);
+  const blockSize = CITY.blockSize - CITY.roadWidth;
+  const px = toX(bx - blockSize / 2);
+  const py = toY(bz - blockSize / 2);
+  const pw = blockSize * scale;
+  if (kind === 'park') {
+    ctx.fillStyle = PALETTE.park;
+    ctx.fillRect(px, py, pw, pw);
+    // A few tree dots scattered on the lawn.
+    ctx.fillStyle = PALETTE.parkTree;
+    const spots = [[-12, -10], [12, 8], [10, -12], [-14, 10], [2, -14]];
+    for (const [ox, oz] of spots) {
+      ctx.beginPath();
+      ctx.arc(toX(bx + ox), toY(bz + oz), 1.8, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    return;
+  }
+  if (kind === 'plaza') {
+    ctx.fillStyle = PALETTE.plaza;
+    ctx.fillRect(px, py, pw, pw);
+    // The fountain disc in the middle of the plaza.
+    ctx.fillStyle = PALETTE.water;
+    ctx.beginPath();
+    ctx.arc(toX(bx), toY(bz), 6 * scale, 0, Math.PI * 2);
+    ctx.fill();
+    return;
+  }
+  if (kind === 'station') {
+    ctx.fillStyle = PALETTE.station;
+    ctx.fillRect(px, py, pw, pw);
+    return;
+  }
+  if (kind === 'landmark') {
+    ctx.fillStyle = PALETTE.landmark;
+    ctx.fillRect(px, py, pw, pw);
+    return;
+  }
+  // Ordinary block: a dark slab with one or two building footprints
+  // inset, shaded by the block's stable seed so neighbours differ.
+  ctx.fillStyle = PALETTE.block;
+  ctx.fillRect(px, py, pw, pw);
+  const seed = blockSeed(bx, bz);
+  const shade = seed < 0.33 ? PALETTE.footprintA
+    : (seed < 0.66 ? PALETTE.footprintB : PALETTE.footprintC);
+  ctx.fillStyle = shade;
+  const inset = 8 * scale;
+  if (seed < 0.45) {
+    // Two buildings side by side.
+    const halfW = (pw - inset * 2 - 2 * scale) / 2;
+    ctx.fillRect(px + inset, py + inset, halfW, pw - inset * 2);
+    ctx.fillRect(px + inset + halfW + 2 * scale, py + inset, halfW, pw - inset * 2);
+  } else {
+    ctx.fillRect(px + inset, py + inset, pw - inset * 2, pw - inset * 2);
+  }
+}
+
+function paintBlocks(g) {
+  for (const bx of BLOCK_AXES) {
+    for (const bz of BLOCK_AXES) {
+      paintOneBlock(g, bx, bz);
+    }
+  }
+}
+
+function paintRoads(g, map) {
+  const { ctx, scale, toX, toY } = g;
+  const roads = map.roads || [];
+  // One pass per style: a darker edge, the road itself, then a dashed
+  // centreline so each road reads as a road, not a grey band.
+  const trace = (road) => {
+    ctx.beginPath();
+    if (road.axis === 'z') {
+      ctx.moveTo(toX(road.at), toY(road.min));
+      ctx.lineTo(toX(road.at), toY(road.max));
+    } else {
+      ctx.moveTo(toX(road.min), toY(road.at));
+      ctx.lineTo(toX(road.max), toY(road.at));
+    }
+    ctx.stroke();
+  };
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = PALETTE.roadEdge;
+  ctx.lineWidth = Math.max(2, CITY.roadWidth * scale + 2);
+  for (const road of roads) trace(road);
+  ctx.strokeStyle = PALETTE.road;
+  ctx.lineWidth = Math.max(1, CITY.roadWidth * scale);
+  for (const road of roads) trace(road);
+  ctx.strokeStyle = PALETTE.roadDash;
+  ctx.lineWidth = 1;
+  ctx.setLineDash([4, 5]);
+  for (const road of roads) trace(road);
+  ctx.setLineDash([]);
+}
+
+function paintLabels(g) {
+  const { ctx, toX, toY } = g;
+  // District names, small with a dark outline so they stay legible over
+  // the blocks, and the ferris wheel as a coral ring so the north edge
+  // reads on the map.
+  ctx.font = 'bold 8px sans-serif';
+  ctx.textAlign = 'center';
+  for (const label of DISTRICTS) {
+    const lx = toX(label.x);
+    const ly = toY(label.z);
+    ctx.lineWidth = 2.5;
+    ctx.strokeStyle = 'rgba(16, 24, 32, 0.85)';
+    ctx.strokeText(label.name, lx, ly);
+    ctx.fillStyle = 'rgba(244, 241, 232, 0.9)';
+    ctx.fillText(label.name, lx, ly);
+  }
+  ctx.strokeStyle = PALETTE.landmark;
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.arc(toX(WHEEL.x), toY(WHEEL.z), 3.5, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.fillStyle = PALETTE.landmark;
+  ctx.beginPath();
+  ctx.arc(toX(WHEEL.x), toY(WHEEL.z), 1.5, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function paintMarkers(g, map, pulse) {
+  const { ctx, toX, toY } = g;
+  const dot = (x, z, r, color) => {
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(toX(x), toY(z), r, 0, Math.PI * 2);
+    ctx.fill();
+  };
+  // Cash pickups first (under everything else), then traffic with a dark
+  // outline so the dots read against the pale roads.
+  for (const p of map.pickups || []) {
+    if (p.available) dot(p.x, p.z, 2.5, PALETTE.pickup);
+  }
+  for (const car of map.traffic || []) {
+    dot(car.x, car.z, 2.5, PALETTE.traffic);
+    ctx.strokeStyle = INK;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(toX(car.x), toY(car.z), 2.5, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  // Mission marker: a pulsing gold diamond with a white outline and a
+  // faint outer ring, so the objective is unmissable.
+  if (map.marker && map.marker.active) {
+    const size = 5 + Math.sin(pulse * 4) * 1.5;
+    const mx = toX(map.marker.x);
+    const my = toY(map.marker.z);
+    ctx.strokeStyle = 'rgba(255, 210, 60, 0.5)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(mx, my, size + 5, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.fillStyle = PALETTE.mission;
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(mx, my - size);
+    ctx.lineTo(mx + size, my);
+    ctx.lineTo(mx, my + size);
+    ctx.lineTo(mx - size, my);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+  }
+  // Police blips on top of traffic so a chase reads at a glance.
+  for (const unit of map.police || []) {
+    dot(unit.x, unit.z, 3.5, PALETTE.police);
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(toX(unit.x), toY(unit.z), 3.5, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+}
+
+function paintPlayer(g, map) {
+  const { ctx, half, toX, toY } = g;
+  // The player: a white arrow pointing where Leo faces, with a soft
+  // outer glow ring so it pops against the map.
+  const heading = map.playerHeading || 0;
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.35)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(half, half, 11, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.save();
+  ctx.translate(half, half);
+  // Screen y grows downward while world -z is "forward" (north, up on
+  // the map), so the arrow turns by -heading to stay honest.
+  ctx.rotate(-heading);
+  ctx.fillStyle = PALETTE.player;
+  ctx.strokeStyle = INK;
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(0, -8);
+  ctx.lineTo(5.5, 6);
+  ctx.lineTo(0, 3);
+  ctx.lineTo(-5.5, 6);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  ctx.restore();
+  void toX;
+  void toY;
 }
 
 export class SolmarHud {
@@ -169,8 +478,9 @@ export class SolmarHud {
     const half = size / 2;
     const radius = map.worldRadius || MINIMAP.worldRadius;
     const scale = half / radius;
-    const toMapX = (x) => half + (x - map.playerX) * scale;
-    const toMapY = (z) => half + (z - map.playerZ) * scale;
+    const toX = (x) => half + (x - map.playerX) * scale;
+    const toY = (z) => half + (z - map.playerZ) * scale;
+    const g = { ctx, half, scale, toX, toY };
 
     ctx.clearRect(0, 0, size, size);
     // Round clip so the map stays a circle.
@@ -178,118 +488,24 @@ export class SolmarHud {
     ctx.beginPath();
     ctx.arc(half, half, half - 1, 0, Math.PI * 2);
     ctx.clip();
-    ctx.fillStyle = MAP_BG;
+    ctx.fillStyle = PALETTE.bg;
     ctx.fillRect(0, 0, size, size);
 
-    // Ocean on the west edge, sand strip beside it.
-    const oceanX = toMapX(CITY.oceanEndX);
-    const sandX = toMapX(CITY.beachStartX);
-    ctx.fillStyle = MAP_WATER;
-    ctx.fillRect(0, 0, Math.max(0, sandX), size);
-    ctx.fillStyle = MAP_SAND;
-    ctx.fillRect(Math.max(0, sandX), 0, Math.max(0, toMapX(CITY.beachEndX) - sandX), size);
+    paintSeaAndSand(g, map);
+    paintPromenade(g);
+    paintBlocks(g);
+    paintRoads(g, map);
+    paintLabels(g);
+    paintMarkers(g, map, this.minimapPulse);
+    paintPlayer(g, map);
+    ctx.restore();
 
-    // City blocks as faint squares, then roads as pale strips.
-    ctx.fillStyle = MAP_BLOCK;
-    const blockCenters = [-150, -90, -30, 30, 90, 150];
-    for (const bx of blockCenters) {
-      for (const bz of blockCenters) {
-        const px = toMapX(bx - 23);
-        const py = toMapY(bz - 23);
-        ctx.fillRect(px, py, 46 * scale, 46 * scale);
-      }
-    }
-    const roads = map.roads || [];
-    ctx.strokeStyle = MAP_ROAD_EDGE;
-    ctx.lineCap = 'round';
-    for (const road of roads) {
-      ctx.lineWidth = Math.max(2, CITY.roadWidth * scale + 2);
-      ctx.beginPath();
-      if (road.axis === 'z') {
-        ctx.moveTo(toMapX(road.at), toMapY(road.min));
-        ctx.lineTo(toMapX(road.at), toMapY(road.max));
-      } else {
-        ctx.moveTo(toMapX(road.min), toMapY(road.at));
-        ctx.lineTo(toMapX(road.max), toMapY(road.at));
-      }
-      ctx.stroke();
-    }
-    ctx.strokeStyle = MAP_ROAD;
-    for (const road of roads) {
-      ctx.lineWidth = Math.max(1, CITY.roadWidth * scale);
-      ctx.beginPath();
-      if (road.axis === 'z') {
-        ctx.moveTo(toMapX(road.at), toMapY(road.min));
-        ctx.lineTo(toMapX(road.at), toMapY(road.max));
-      } else {
-        ctx.moveTo(toMapX(road.min), toMapY(road.at));
-        ctx.lineTo(toMapX(road.max), toMapY(road.at));
-      }
-      ctx.stroke();
-    }
-
-    const dot = (x, z, r, color) => {
-      ctx.fillStyle = color;
-      ctx.beginPath();
-      ctx.arc(toMapX(x), toMapY(z), r, 0, Math.PI * 2);
-      ctx.fill();
-    };
-
-    // Cash pickups first (under everything else), then traffic.
-    for (const p of map.pickups || []) {
-      if (p.available) dot(p.x, p.z, 2.5, MAP_PICKUP);
-    }
-    for (const car of map.traffic || []) {
-      dot(car.x, car.z, 2.5, MAP_TRAFFIC);
-    }
-    // Mission marker: a pulsing gold diamond.
-    if (map.marker && map.marker.active) {
-      const pulse = 5 + Math.sin(this.minimapPulse * 4) * 1.5;
-      const mx = toMapX(map.marker.x);
-      const my = toMapY(map.marker.z);
-      ctx.fillStyle = MAP_MISSION;
-      ctx.beginPath();
-      ctx.moveTo(mx, my - pulse);
-      ctx.lineTo(mx + pulse, my);
-      ctx.lineTo(mx, my + pulse);
-      ctx.lineTo(mx - pulse, my);
-      ctx.closePath();
-      ctx.fill();
-    }
-    // Police blips on top of traffic so a chase reads at a glance.
-    for (const unit of map.police || []) {
-      dot(unit.x, unit.z, 3.5, MAP_POLICE);
-      ctx.strokeStyle = '#ffffff';
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.arc(toMapX(unit.x), toMapY(unit.z), 3.5, 0, Math.PI * 2);
-      ctx.stroke();
-    }
-
-    // The player: a white arrow pointing where Leo faces.
-    const heading = map.playerHeading || 0;
-    const px = half;
-    const py = half;
-    ctx.save();
-    ctx.translate(px, py);
-    // Screen y grows downward while world -z is "forward" (north, up on
-    // the map), so the arrow turns by -heading to stay honest.
-    ctx.rotate(-heading);
-    ctx.fillStyle = MAP_PLAYER;
-    ctx.strokeStyle = '#101820';
-    ctx.lineWidth = 1.5;
+    // Thin ring border around the whole circle, then the north tick.
+    ctx.strokeStyle = PALETTE.ring;
+    ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.moveTo(0, -8);
-    ctx.lineTo(5.5, 6);
-    ctx.lineTo(0, 3);
-    ctx.lineTo(-5.5, 6);
-    ctx.closePath();
-    ctx.fill();
+    ctx.arc(half, half, half - 1.5, 0, Math.PI * 2);
     ctx.stroke();
-    ctx.restore();
-    ctx.restore();
-
-    // North tick at the top edge of the circle.
     ctx.fillStyle = '#f4f1e8';
     ctx.font = 'bold 11px sans-serif';
     ctx.textAlign = 'center';
