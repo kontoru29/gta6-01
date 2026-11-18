@@ -5,7 +5,7 @@
 // then to look around, and breaking into a panicked run when something
 // scares them — a gunshot, a speeding car, or Leo throwing a punch.
 //
-// What other modules call (the contract — keep every name and signature):
+// The contract other modules rely on (every name and signature stays):
 //   createPedestrianSystem(scene, city, options)
 //     options.count  — how many walkers to have out at once (default 26).
 //     options.random — a random function; Math.random when not given.
@@ -48,59 +48,69 @@ import { PEDESTRIANS } from './config.js';
 import {
   clamp,
   lerpAngle,
-  randomPick,
   distance2D,
 } from './utils.js';
 
 // ---------------------------------------------------------------------------
 // Tuning — local to this module so it still works on its own.
 // ---------------------------------------------------------------------------
-const MAX_WALKERS = 48;
-const PANIC_FADE = 0.25; // panic lost per second once the danger is gone
-const SCARE_GUNSHOT = 26; // metres a gunshot's panic reaches, at least
-const SCARE_CAR = 16; // metres a speeding car's panic reaches, at least
-const SCARE_ATTACK = 12; // metres a punch's panic reaches, at least
-const PAUSE_CHANCE = 0.12; // walkers who stop for a breather at waypoints
-const PAUSE_SHORT = 2; // seconds, shortest breather
-const PAUSE_LONG = 6; // seconds, longest breather
-const WALK_SPEED_MIN = PEDESTRIANS.walkSpeedMin;
-const WALK_SPEED_MAX = PEDESTRIANS.walkSpeedMax;
-const FLEE_SPEED = PEDESTRIANS.fleeSpeed;
+const CROWD_LIMIT = 48;
+const PANIC_DECAY = 0.25; // panic lost per second once the danger is gone
+const REACH_GUNSHOT = 26; // metres a gunshot's panic reaches, at least
+const REACH_CAR = 16; // metres a speeding car's panic reaches, at least
+const REACH_ATTACK = 12; // metres a punch's panic reaches, at least
+const BREATHER_ODDS = 0.12; // walkers who stop for a breather at waypoints
+const BREATHER_MIN = 2; // seconds, shortest breather
+const BREATHER_MAX = 6; // seconds, longest breather
+const DODGE_NOTICE = 2.2; // how much further than a threat's radius a walker notices it
+const DODGE_SPAN = 0.5; // seconds a sidestep lasts
+const DODGE_PACE = 2.0; // metres per second, stepping sideways
+const DODGE_WAIT = 1.2; // seconds before the same walker dodges again
+
+// One shared empty threat list, used when update() gets no threats —
+// assigning it costs nothing, unlike building a fresh array per frame.
+const NO_THREATS = [];
+const STROLL_SLOW = PEDESTRIANS.walkSpeedMin;
+const STROLL_FAST = PEDESTRIANS.walkSpeedMax;
+const RUN_SPEED = PEDESTRIANS.fleeSpeed;
 
 // Crowd variety: skin, hair, shirts and trousers picked per walker, so a
 // street full of them reads as people, not clones.
 const SKIN_TONES = [0xc98d64, 0x8a5a3b, 0xe8b98d, 0x6e4426, 0xd9a077];
-const HAIR_COLORS = [0x2b1d12, 0x111111, 0x6e4a1f, 0x9a9a9a, 0x3d2b1f];
+const HAIR_TONES = [0x2b1d12, 0x111111, 0x6e4a1f, 0x9a9a9a, 0x3d2b1f];
 const HAIR_STYLES = ['cap', 'tail', 'flat', 'afro'];
-const SHIRT_COLORS = [
+const SHIRT_TONES = [
   0xe23b3b, 0x2f7fd0, 0xf2b234, 0x37b268, 0xf2f0e6,
   0x8a5fbf, 0xe87aa0, 0x3a6b4f, 0xd97b2f, 0x5b7a99,
 ];
-const TROUSER_COLORS = [0x2e3d55, 0x3a3a3a, 0x6b4a2f, 0x7a7f8a, 0x243b2e];
-const SHOE_COLOR = 0x2a2320;
+const PANTS_TONES = [0x2e3d55, 0x3a3a3a, 0x6b4a2f, 0x7a7f8a, 0x243b2e];
+const SHOE_TONE = 0x2a2320;
 
 // ---------------------------------------------------------------------------
 // One procedural walker. Same idea as Leo's figure — boxes, spheres and
 // cylinders on pivots at shoulders and hips — but smaller, cheaper and
 // randomised, so a street full of them reads as a crowd.
 // ---------------------------------------------------------------------------
-function makeWalkerFigure(rand) {
-  const root = new THREE.Group();
+function buildFigure(rand) {
+  const body = new THREE.Group();
   const stature = 0.92 + rand() * 0.16; // 0.92 .. 1.08, a head of variety
 
+  // Pick one entry from a list with the injected random source.
+  const pick = (list) => list[Math.floor(rand() * list.length)];
+
   const skinMat = new THREE.MeshStandardMaterial({
-    color: randomPick(SKIN_TONES, rand), roughness: 0.8,
+    color: pick(SKIN_TONES), roughness: 0.8,
   });
   const hairMat = new THREE.MeshStandardMaterial({
-    color: randomPick(HAIR_COLORS, rand), roughness: 0.95,
+    color: pick(HAIR_TONES), roughness: 0.95,
   });
   const shirtMat = new THREE.MeshStandardMaterial({
-    color: randomPick(SHIRT_COLORS, rand), roughness: 0.9,
+    color: pick(SHIRT_TONES), roughness: 0.9,
   });
-  const trouserMat = new THREE.MeshStandardMaterial({
-    color: randomPick(TROUSER_COLORS, rand), roughness: 0.9,
+  const pantsMat = new THREE.MeshStandardMaterial({
+    color: pick(PANTS_TONES), roughness: 0.9,
   });
-  const shoeMat = new THREE.MeshStandardMaterial({ color: SHOE_COLOR, roughness: 0.85 });
+  const shoeMat = new THREE.MeshStandardMaterial({ color: SHOE_TONE, roughness: 0.85 });
 
   // A slab is a box dropped into place, shadow and all.
   function slab(material, size, at, parent) {
@@ -112,39 +122,39 @@ function makeWalkerFigure(rand) {
   }
 
   // Shirt torso, trouser hips, head, then hair in one of four styles.
-  slab(shirtMat, [0.48, 0.58, 0.28], [0, 1.14, 0], root);
-  slab(trouserMat, [0.46, 0.2, 0.28], [0, 0.8, 0], root);
+  slab(shirtMat, [0.48, 0.58, 0.28], [0, 1.14, 0], body);
+  slab(pantsMat, [0.46, 0.2, 0.28], [0, 0.8, 0], body);
   const head = new THREE.Mesh(new THREE.SphereGeometry(0.2, 16, 12), skinMat);
   head.position.set(0, 1.62, 0);
   head.castShadow = true;
-  root.add(head);
+  body.add(head);
 
-  const style = randomPick(HAIR_STYLES, rand);
+  const style = pick(HAIR_STYLES);
   if (style === 'cap') {
     const cap = new THREE.Mesh(
       new THREE.SphereGeometry(0.205, 16, 10, 0, Math.PI * 2, 0, Math.PI * 0.5),
       hairMat,
     );
     cap.position.set(0, 1.66, 0);
-    root.add(cap);
+    body.add(cap);
   } else if (style === 'tail') {
     const cap = new THREE.Mesh(
       new THREE.SphereGeometry(0.205, 16, 10, 0, Math.PI * 2, 0, Math.PI * 0.45),
       hairMat,
     );
     cap.position.set(0, 1.66, 0);
-    root.add(cap);
+    body.add(cap);
     const tail = new THREE.Mesh(new THREE.SphereGeometry(0.07, 10, 8), hairMat);
     tail.position.set(0, 1.6, -0.2);
-    root.add(tail);
+    body.add(tail);
   } else if (style === 'afro') {
     const afro = new THREE.Mesh(new THREE.SphereGeometry(0.24, 14, 10), hairMat);
     afro.position.set(0, 1.72, 0);
     afro.scale.set(1, 0.85, 1);
-    root.add(afro);
+    body.add(afro);
   } else {
     // 'flat': a low slab of hair across the top of the head.
-    slab(hairMat, [0.34, 0.07, 0.34], [0, 1.78, 0], root);
+    slab(hairMat, [0.34, 0.07, 0.34], [0, 1.78, 0], body);
   }
 
   // Arms and legs hang from pivots, like Leo's, for the same swing walk.
@@ -155,21 +165,21 @@ function makeWalkerFigure(rand) {
     const hand = new THREE.Mesh(new THREE.SphereGeometry(0.07, 10, 8), skinMat);
     hand.position.set(0, -0.52, 0);
     pivot.add(hand);
-    root.add(pivot);
+    body.add(pivot);
     return pivot;
   }
   function buildLeg(side) {
     const pivot = new THREE.Group();
     pivot.position.set(0.13 * side, 0.72, 0);
-    slab(trouserMat, [0.18, 0.58, 0.2], [0, -0.29, 0], pivot);
+    slab(pantsMat, [0.18, 0.58, 0.2], [0, -0.29, 0], pivot);
     slab(shoeMat, [0.19, 0.08, 0.3], [0, -0.62, 0.04], pivot);
-    root.add(pivot);
+    body.add(pivot);
     return pivot;
   }
 
-  root.scale.setScalar(stature);
+  body.scale.setScalar(stature);
   return {
-    root,
+    root: body,
     armLeft: buildArm(-1),
     armRight: buildArm(1),
     legLeft: buildLeg(-1),
@@ -179,7 +189,7 @@ function makeWalkerFigure(rand) {
 
 // Fallback pavements (only when the city supplies neither sidewalks nor
 // lanes): walkways running alongside a 5x5 street grid, 40 metres apart.
-function fallbackRoutes() {
+function gridRoutes() {
   const routes = [];
   const step = 40;
   for (let i = -2; i <= 2; i += 1) {
@@ -228,7 +238,7 @@ export function createPedestrianSystem(scene, city = {}, options = {}) {
   } else if (city.lanes && city.lanes.length > 0) {
     routes = routesFromLanes(city.lanes);
   } else {
-    routes = fallbackRoutes();
+    routes = gridRoutes();
   }
   const limits = city.bounds || { minX: -190, maxX: 190, minZ: -190, maxZ: 190 };
   const rand = typeof options.random === 'function' ? options.random : Math.random;
@@ -237,17 +247,18 @@ export function createPedestrianSystem(scene, city = {}, options = {}) {
   // Danger points fed in by update() this frame; each is { x, z, radius }.
   let liveThreats = [];
 
-  function pickRoute() {
+  function chooseRoute() {
     return routes[Math.floor(rand() * routes.length)];
   }
 
-  function spawnOne() {
-    if (walkers.length >= MAX_WALKERS) return null;
-    const figure = makeWalkerFigure(rand);
-    const route = pickRoute();
+  function spawnWalker() {
+    if (walkers.length >= CROWD_LIMIT) return null;
+    const figure = buildFigure(rand);
+    const route = chooseRoute();
     // Spawn at a random spot ALONG a random stretch of the route, not on
     // its listed corners — otherwise every walker would start bunched up.
-    const legIndex = Math.floor(rand() * (route.points.length - 1));
+    const legCount = Math.max(1, route.points.length - 1);
+    const legIndex = Math.floor(rand() * legCount);
     const from = route.points[legIndex];
     const to = route.points[legIndex + 1];
     const along = rand();
@@ -264,7 +275,7 @@ export function createPedestrianSystem(scene, city = {}, options = {}) {
       legRight: figure.legRight,
       heading: rand() * Math.PI * 2,
       speed: 0,
-      walkSpeed: WALK_SPEED_MIN + rand() * (WALK_SPEED_MAX - WALK_SPEED_MIN),
+      walkSpeed: STROLL_SLOW + rand() * (STROLL_FAST - STROLL_SLOW),
       state: 'walking',
       panic: 0,
       health: 40,
@@ -276,6 +287,13 @@ export function createPedestrianSystem(scene, city = {}, options = {}) {
       idleLeft: 0,
       fleeX: 0,
       fleeZ: 0,
+      // Sidestep state: a short sideways hop when a car comes close.
+      dodgeT: 0,
+      dodgeCool: 0,
+      dodgeX: 0,
+      dodgeZ: 0,
+      // Gait variety: every walker swings their arms a little differently.
+      swing: 0.45 + rand() * 0.25,
     };
     walker.group.rotation.y = walker.heading;
     walkers.push(walker);
@@ -286,7 +304,7 @@ export function createPedestrianSystem(scene, city = {}, options = {}) {
   // Panic is a number 0..1. A scare sets it to 1; it fades once the danger
   // is gone. While panicking the walker runs straight away from the nearest
   // threat and leaves the pavement — getting off the road is the point.
-  function scareWalker(walker, threatX, threatZ) {
+  function panicWalker(walker, threatX, threatZ) {
     walker.panic = 1;
     walker.state = 'fleeing';
     walker.idleLeft = 0;
@@ -297,11 +315,11 @@ export function createPedestrianSystem(scene, city = {}, options = {}) {
     walker.fleeZ = dz / length;
   }
 
-  function turnWalker(walker, targetHeading, dt, rate) {
+  function faceToward(walker, targetHeading, dt, rate) {
     walker.heading = lerpAngle(walker.heading, targetHeading, rate * dt);
   }
 
-  function swingWalker(walker, amount) {
+  function swingLimbs(walker, amount) {
     const wave = Math.sin(walker.walkPhase);
     walker.legLeft.rotation.x = wave * amount;
     walker.legRight.rotation.x = -wave * amount;
@@ -309,7 +327,7 @@ export function createPedestrianSystem(scene, city = {}, options = {}) {
     walker.armRight.rotation.x = wave * amount * 0.7;
   }
 
-  function restWalker(walker, dt) {
+  function settleLimbs(walker, dt) {
     const ease = Math.min(1, dt * 6);
     walker.legLeft.rotation.x *= 1 - ease;
     walker.legRight.rotation.x *= 1 - ease;
@@ -317,72 +335,105 @@ export function createPedestrianSystem(scene, city = {}, options = {}) {
     walker.armRight.rotation.x *= 1 - ease;
   }
 
-  // Fleeing walkers drift apart from each other a little, so a panicked
-  // crowd spreads instead of running in a single clump.
-  function separationNudge(walker) {
-    let pushX = 0;
-    let pushZ = 0;
-    for (const other of walkers) {
-      if (other === walker || other.state !== 'fleeing') continue;
-      const dx = walker.group.position.x - other.group.position.x;
-      const dz = walker.group.position.z - other.group.position.z;
-      const distSq = dx * dx + dz * dz;
-      if (distSq < 2.25 && distSq > 0.0001) {
-        const dist = Math.sqrt(distSq);
-        pushX += (dx / dist) * (1.5 - dist);
-        pushZ += (dz / dist) * (1.5 - dist);
-      }
-    }
-    return { x: pushX, z: pushZ };
-  }
+  // (Separation between fleeing walkers is computed inline in stepWalker,
+  // straight into local numbers — no throwaway object per walker per frame.)
 
   function stepWalker(walker, dt) {
     const pos = walker.group.position;
 
     // Live threats first: the closest danger inside its radius wins.
-    let closestThreat = null;
-    let closestDist = Infinity;
+    // In the same pass, notice a threat just outside the panic radius —
+    // a car closing in is worth a sidestep, not a full-blown panic.
+    let nearestThreat = null;
+    let nearestDist = Infinity;
+    let nearThreat = null;
+    let nearDist = Infinity;
     for (const threat of liveThreats) {
       const dist = distance2D(pos.x, pos.z, threat.x, threat.z);
-      if (dist < threat.radius && dist < closestDist) {
-        closestThreat = threat;
-        closestDist = dist;
+      if (dist < threat.radius && dist < nearestDist) {
+        nearestThreat = threat;
+        nearestDist = dist;
+      } else if (dist < threat.radius * DODGE_NOTICE && dist < nearDist) {
+        nearThreat = threat;
+        nearDist = dist;
       }
     }
-    if (closestThreat) scareWalker(walker, closestThreat.x, closestThreat.z);
+    if (nearestThreat) panicWalker(walker, nearestThreat.x, nearestThreat.z);
+
+    // Sidestep timers tick down in every state.
+    if (walker.dodgeCool > 0) walker.dodgeCool -= dt;
+    if (walker.dodgeT > 0) walker.dodgeT -= dt;
+
+    // A car closing in: step sideways, away from it, for half a second.
+    // Only while strolling — a fleeing walker is already running for it.
+    if (nearThreat && walker.state === 'walking'
+      && walker.dodgeT <= 0 && walker.dodgeCool <= 0) {
+      const awayX = pos.x - nearThreat.x;
+      const awayZ = pos.z - nearThreat.z;
+      // Step perpendicular to the way the walker faces, picking the side
+      // that leads away from the threat.
+      const fwdX = -Math.sin(walker.heading);
+      const fwdZ = -Math.cos(walker.heading);
+      let sideX = fwdZ;
+      let sideZ = -fwdX;
+      if (sideX * awayX + sideZ * awayZ < 0) {
+        sideX = -sideX;
+        sideZ = -sideZ;
+      }
+      walker.dodgeX = sideX;
+      walker.dodgeZ = sideZ;
+      walker.dodgeT = DODGE_SPAN;
+      walker.dodgeCool = DODGE_WAIT;
+    }
 
     if (walker.state === 'fleeing') {
       // Run away from the threat, weaving gently so walkers fan out.
       const weave = Math.sin(walker.walkPhase * 0.7) * 0.3;
-      const nudge = separationNudge(walker);
-      let runX = walker.fleeX + -walker.fleeZ * weave + nudge.x * 0.4;
-      let runZ = walker.fleeZ + walker.fleeX * weave + nudge.z * 0.4;
+      // Fleeing walkers drift apart a little, so a panicked crowd spreads
+      // instead of running in a single clump. Straight into local numbers.
+      let pushX = 0;
+      let pushZ = 0;
+      for (const other of walkers) {
+        if (other === walker || other.state !== 'fleeing') continue;
+        const dx = pos.x - other.group.position.x;
+        const dz = pos.z - other.group.position.z;
+        const distSq = dx * dx + dz * dz;
+        if (distSq < 2.25 && distSq > 0.0001) {
+          const dist = Math.sqrt(distSq);
+          pushX += (dx / dist) * (1.5 - dist);
+          pushZ += (dz / dist) * (1.5 - dist);
+        }
+      }
+      let runX = walker.fleeX + -walker.fleeZ * weave + pushX * 0.4;
+      let runZ = walker.fleeZ + walker.fleeX * weave + pushZ * 0.4;
       const runLength = Math.hypot(runX, runZ) || 1;
       runX /= runLength;
       runZ /= runLength;
-      turnWalker(walker, Math.atan2(-runX, -runZ), dt, 5);
-      walker.speed = FLEE_SPEED * (0.6 + walker.panic * 0.4);
+      faceToward(walker, Math.atan2(-runX, -runZ), dt, 5);
+      walker.speed = RUN_SPEED * (0.6 + walker.panic * 0.4);
       pos.x = clamp(pos.x + runX * walker.speed * dt, limits.minX, limits.maxX);
       pos.z = clamp(pos.z + runZ * walker.speed * dt, limits.minZ, limits.maxZ);
+      pos.y = 0;
       walker.group.rotation.y = walker.heading;
       walker.walkPhase += dt * walker.speed * 2.2;
-      swingWalker(walker, 0.9);
-      walker.panic = Math.max(0, walker.panic - PANIC_FADE * dt);
+      swingLimbs(walker, 0.9);
+      walker.panic = Math.max(0, walker.panic - PANIC_DECAY * dt);
       if (walker.panic <= 0) {
         // Calmed down: stroll again from the closest point of a route,
         // instead of marching across the city to a random waypoint.
         walker.state = 'walking';
-        walker.route = pickRoute();
-        let nearestIndex = 0;
-        let nearestDist = Infinity;
-        walker.route.points.forEach((point, index) => {
+        walker.route = chooseRoute();
+        let bestIndex = 0;
+        let bestDist = Infinity;
+        for (let i = 0; i < walker.route.points.length; i += 1) {
+          const point = walker.route.points[i];
           const d = (point.x - pos.x) * (point.x - pos.x) + (point.z - pos.z) * (point.z - pos.z);
-          if (d < nearestDist) {
-            nearestDist = d;
-            nearestIndex = index;
+          if (d < bestDist) {
+            bestDist = d;
+            bestIndex = i;
           }
-        });
-        walker.routeIndex = nearestIndex;
+        }
+        walker.routeIndex = bestIndex;
         walker.routeDir = 1;
       }
       return;
@@ -392,9 +443,10 @@ export function createPedestrianSystem(scene, city = {}, options = {}) {
     if (walker.state === 'idle') {
       walker.idleLeft -= dt;
       walker.speed = 0;
+      pos.y = 0;
       walker.heading += Math.sin(walker.walkPhase) * dt * 0.4;
       walker.group.rotation.y = walker.heading;
-      restWalker(walker, dt);
+      settleLimbs(walker, dt);
       if (walker.idleLeft <= 0) walker.state = 'walking';
       return;
     }
@@ -413,33 +465,40 @@ export function createPedestrianSystem(scene, city = {}, options = {}) {
         walker.routeIndex = clamp(walker.routeIndex, 0, points.length - 1);
       }
       // Sometimes stop for a breather instead of marching on.
-      if (rand() < PAUSE_CHANCE) {
+      if (rand() < BREATHER_ODDS) {
         walker.state = 'idle';
-        walker.idleLeft = PAUSE_SHORT + rand() * (PAUSE_LONG - PAUSE_SHORT);
+        walker.idleLeft = BREATHER_MIN + rand() * (BREATHER_MAX - BREATHER_MIN);
       }
       return;
     }
-    turnWalker(walker, Math.atan2(-dx, -dz), dt, 4);
+    faceToward(walker, Math.atan2(-dx, -dz), dt, 4);
     walker.speed = walker.walkSpeed;
     pos.x += -Math.sin(walker.heading) * walker.speed * dt;
     pos.z += -Math.cos(walker.heading) * walker.speed * dt;
+    // A sidestep in progress rides on top of the stroll, then fades out.
+    if (walker.dodgeT > 0) {
+      pos.x = clamp(pos.x + walker.dodgeX * DODGE_PACE * dt, limits.minX, limits.maxX);
+      pos.z = clamp(pos.z + walker.dodgeZ * DODGE_PACE * dt, limits.minZ, limits.maxZ);
+    }
+    // A small bob with each step, sized to this walker's own gait.
+    pos.y = Math.abs(Math.sin(walker.walkPhase)) * 0.03;
     walker.group.rotation.y = walker.heading;
     walker.walkPhase += dt * walker.speed * 2.0;
-    swingWalker(walker, 0.55);
+    swingLimbs(walker, walker.swing);
   }
 
   // A scare event: gunshot, speeding car or attack. Everyone within the
   // radius panics; the radius depends on how scary the event is.
   function addThreat(x, z, radius, kind = 'attack') {
-    let effectiveRadius = radius;
-    if (kind === 'gunshot') effectiveRadius = Math.max(radius, SCARE_GUNSHOT);
-    if (kind === 'car') effectiveRadius = Math.max(radius, SCARE_CAR);
-    if (kind === 'attack') effectiveRadius = Math.max(radius, SCARE_ATTACK);
+    let reach = radius;
+    if (kind === 'gunshot') reach = Math.max(radius, REACH_GUNSHOT);
+    if (kind === 'car') reach = Math.max(radius, REACH_CAR);
+    if (kind === 'attack') reach = Math.max(radius, REACH_ATTACK);
     for (const walker of walkers) {
       const dx = walker.group.position.x - x;
       const dz = walker.group.position.z - z;
-      if (dx * dx + dz * dz < effectiveRadius * effectiveRadius) {
-        scareWalker(walker, x, z);
+      if (dx * dx + dz * dz < reach * reach) {
+        panicWalker(walker, x, z);
       }
     }
   }
@@ -451,7 +510,7 @@ export function createPedestrianSystem(scene, city = {}, options = {}) {
     spawn(count = 1) {
       const made = [];
       for (let i = 0; i < count; i += 1) {
-        const walker = spawnOne();
+        const walker = spawnWalker();
         if (walker) made.push(walker);
       }
       return made;
@@ -459,7 +518,7 @@ export function createPedestrianSystem(scene, city = {}, options = {}) {
 
     addThreat,
 
-    fleeFrom(x, z, radius = SCARE_ATTACK) {
+    fleeFrom(x, z, radius = REACH_ATTACK) {
       addThreat(x, z, radius, 'attack');
     },
 
@@ -477,7 +536,7 @@ export function createPedestrianSystem(scene, city = {}, options = {}) {
     },
 
     update(dt, threats = []) {
-      liveThreats = threats || [];
+      liveThreats = threats || NO_THREATS;
       for (const walker of walkers) stepWalker(walker, dt);
       liveThreats = [];
     },

@@ -1,37 +1,30 @@
-// save.js — Solmar Bay save file: cash, mission progress and best runs,
-// persisted in the browser's localStorage.
+// save.js — Solmar Bay's save file: cash, missions, best runs.
 //
-// The save file is the one place the game remembers anything between
-// sessions. Its shape is deliberately small and boring: a version number,
-// the cash balance, the list of finished mission ids, lifetime stats, the
-// best run so far, and a settings block. Every function that touches the
-// file goes through sanitizeSave(), so a hand-edited, truncated or
-// half-written save can never crash the game — bad values are replaced
-// with defaults and the game carries on.
+// Everything the game remembers between sessions lives in one small JSON
+// blob in localStorage: a version, the cash balance, finished mission ids,
+// lifetime stats, the best run so far and a settings block. main.js and
+// missions.js only ever touch the exported helpers below.
 //
-// Nothing in here knows about missions, the police or the HUD. main.js and
-// missions.js only use the exported helpers: loadSave(), saveSave(),
-// updateSave(), addCashToSave(), hasSave(), resetSave() and
-// createDefaultSave(). The JSON export/import pair is for a manual backup:
-// a player can copy their save out as text and paste it back later.
+// Safety is the whole point. A save that was hand-edited, truncated or
+// half-written must never crash the game, so every value is cleaned on
+// the way in and anything bad quietly becomes a default. Every storage
+// call is wrapped too: a missing or hostile localStorage (private mode,
+// storage off, a non-browser runtime) just makes the functions fall back
+// to an in-memory save.
 
-// The storage key and the format version. The key is part of the contract
-// with every save already out there: never rename it, or old saves strand.
+// The key is a contract with every save already out there — never rename
+// it, or old saves strand.
 export const SAVE_KEY = 'solmar-bay.save.v1';
 export const SAVE_VERSION = 1;
 
-// Caps that keep a runaway number from breaking the HUD or the save file.
-const MAX_CASH = 999999999;
-const MAX_LIFETIME_CASH = 99999999;
-const MAX_STAT = 99999999;
+// Ceilings so a runaway number can't break the HUD or bloat the file.
+const CASH_CAP = 999999999;
+const LIFETIME_CAP = 99999999;
+const STAT_CAP = 99999999;
+const BEST_MISSIONS_CAP = 100;
 
-// ---------------------------------------------------------------------------
-// Storage access, wrapped so a missing or hostile localStorage never throws.
-// ---------------------------------------------------------------------------
-
-// The real localStorage, or null when the browser will not give us one
-// (private mode, disabled storage, or a non-browser runtime).
-function storageHandle() {
+// -------------------------------------------------------------- storage
+function storage() {
   try {
     if (typeof window === 'undefined' || !window.localStorage) return null;
     return window.localStorage;
@@ -41,7 +34,7 @@ function storageHandle() {
 }
 
 export function isStorageAvailable() {
-  const store = storageHandle();
+  const store = storage();
   if (!store) return false;
   try {
     store.setItem('__solmar-bay-probe__', '1');
@@ -52,8 +45,8 @@ export function isStorageAvailable() {
   }
 }
 
-function readStoredText() {
-  const store = storageHandle();
+function fetchText() {
+  const store = storage();
   if (!store) return null;
   try {
     return store.getItem(SAVE_KEY);
@@ -62,8 +55,8 @@ function readStoredText() {
   }
 }
 
-function writeStoredText(text) {
-  const store = storageHandle();
+function storeText(text) {
+  const store = storage();
   if (!store) return false;
   try {
     store.setItem(SAVE_KEY, text);
@@ -73,8 +66,8 @@ function writeStoredText(text) {
   }
 }
 
-function clearStoredText() {
-  const store = storageHandle();
+function clearText() {
+  const store = storage();
   if (!store) return false;
   try {
     store.removeItem(SAVE_KEY);
@@ -84,46 +77,42 @@ function clearStoredText() {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Value cleaning: each helper turns "anything" into one safe value.
-// ---------------------------------------------------------------------------
-
-function finiteOr(value, fallback) {
+// ------------------------------------------------------------ value guards
+// Each one turns "anything at all" into one safe value of the right kind.
+function toNumber(value, fallback) {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 }
 
-function wholeOr(value, fallback, low, high) {
-  const floored = Math.floor(finiteOr(value, fallback));
-  if (floored < low) return low;
-  if (floored > high) return high;
-  return floored;
+function toClampedInt(value, fallback, low, high) {
+  const n = Math.floor(toNumber(value, fallback));
+  if (n < low) return low;
+  if (n > high) return high;
+  return n;
 }
 
-function textOr(value, fallback) {
+function toText(value, fallback) {
   return typeof value === 'string' && value.length > 0 ? value : fallback;
 }
 
-function stringArrayOr(value) {
+function toIdArray(value) {
   if (!Array.isArray(value)) return [];
   const seen = new Set();
-  const out = [];
+  const kept = [];
   for (const entry of value) {
     if (typeof entry === 'string' && entry.length > 0 && !seen.has(entry)) {
       seen.add(entry);
-      out.push(entry);
+      kept.push(entry);
     }
   }
-  return out;
+  return kept;
 }
 
-function objectOr(value) {
-  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value : {};
+function toObject(value) {
+  if (value !== null && typeof value === 'object' && !Array.isArray(value)) return value;
+  return {};
 }
 
-// ---------------------------------------------------------------------------
-// The default save: what a brand-new player starts with.
-// ---------------------------------------------------------------------------
-
+// --------------------------------------------------------------- defaults
 export function createDefaultSave() {
   const now = new Date().toISOString();
   return {
@@ -146,46 +135,40 @@ export function createDefaultSave() {
   };
 }
 
-// ---------------------------------------------------------------------------
-// Sanitising: rebuild a save from a default, keeping only valid values.
-// ---------------------------------------------------------------------------
-
+// -------------------------------------------------------------- sanitising
+// Rebuild a save from a fresh default, keeping only values that check out.
+// An old file upgrades silently to the current version; a bogus one comes
+// back as a fresh save with whatever else survived.
 export function sanitizeSave(raw) {
   const clean = createDefaultSave();
-  const input = objectOr(raw);
+  const input = toObject(raw);
 
-  // The version is always ours: an old file upgrades silently, a bogus
-  // one is treated as a fresh save with whatever else survived.
   clean.version = SAVE_VERSION;
+  clean.cash = toClampedInt(input.cash, 0, 0, CASH_CAP);
+  clean.missionsCompleted = toIdArray(input.missionsCompleted);
 
-  clean.cash = wholeOr(input.cash, 0, 0, MAX_CASH);
-  clean.missionsCompleted = stringArrayOr(input.missionsCompleted);
+  const bestIn = toObject(input.best);
+  clean.best.cash = toClampedInt(bestIn.cash, 0, 0, CASH_CAP);
+  clean.best.missionsCompleted = toClampedInt(bestIn.missionsCompleted, 0, 0, BEST_MISSIONS_CAP);
+  clean.best.playSeconds = toClampedInt(bestIn.playSeconds, 0, 0, STAT_CAP);
 
-  const bestIn = objectOr(input.best);
-  clean.best.cash = wholeOr(bestIn.cash, 0, 0, MAX_CASH);
-  clean.best.missionsCompleted = wholeOr(bestIn.missionsCompleted, 0, 0, 100);
-  clean.best.playSeconds = wholeOr(bestIn.playSeconds, 0, 0, MAX_STAT);
-
-  const statsIn = objectOr(input.stats);
+  const statsIn = toObject(input.stats);
   for (const key of Object.keys(clean.stats)) {
-    clean.stats[key] = wholeOr(statsIn[key], 0, 0, MAX_STAT);
+    clean.stats[key] = toClampedInt(statsIn[key], 0, 0, STAT_CAP);
   }
-  clean.stats.cashEarned = wholeOr(statsIn.cashEarned, 0, 0, MAX_LIFETIME_CASH);
+  clean.stats.cashEarned = toClampedInt(statsIn.cashEarned, 0, 0, LIFETIME_CAP);
 
-  const settingsIn = objectOr(input.settings);
+  const settingsIn = toObject(input.settings);
   clean.settings.muted = settingsIn.muted === true;
 
-  clean.createdAt = textOr(input.createdAt, clean.createdAt);
-  clean.updatedAt = textOr(input.updatedAt, clean.updatedAt);
+  clean.createdAt = toText(input.createdAt, clean.createdAt);
+  clean.updatedAt = toText(input.updatedAt, clean.updatedAt);
   return clean;
 }
 
-// ---------------------------------------------------------------------------
-// Load / save / update: the three calls the game actually makes.
-// ---------------------------------------------------------------------------
-
+// ----------------------------------------------------- load / save / update
 export function loadSave() {
-  const text = readStoredText();
+  const text = fetchText();
   if (text === null || text === '') return createDefaultSave();
   try {
     return sanitizeSave(JSON.parse(text));
@@ -194,18 +177,18 @@ export function loadSave() {
   }
 }
 
-// Write a save object to localStorage. The object is sanitised first, so
-// callers can pass a partially built save. Returns true when the write
-// landed, false when storage is unavailable or full.
+// Write a save object to storage. It is sanitised first, so callers may
+// hand in a half-built save. True when the write landed, false when the
+// storage is unavailable or full.
 export function saveSave(saveData) {
   const clean = sanitizeSave(saveData);
   clean.updatedAt = new Date().toISOString();
-  return writeStoredText(JSON.stringify(clean));
+  return storeText(JSON.stringify(clean));
 }
 
-// Load, let `patch` mutate the save in place, then write it back. Returns
-// the updated save object. When storage is unavailable the patch still
-// runs on the in-memory copy and the result is returned.
+// Load, let `patch` change the save in place, then write it back. Returns
+// the updated save. When storage is unavailable the patch still runs on
+// the in-memory copy and the result is returned.
 export function updateSave(patch) {
   const current = loadSave();
   if (typeof patch === 'function') patch(current);
@@ -213,11 +196,11 @@ export function updateSave(patch) {
   return current;
 }
 
-// True when localStorage holds a save that parses into a valid shape.
-// A stray JSON object under the key does not count: a real save always
-// carries a cash number or a missions list.
+// True when storage holds a save that parses into a real shape. A stray
+// JSON object under the key does not count: a genuine save always carries
+// a cash number or a missions list.
 export function hasSave() {
-  const text = readStoredText();
+  const text = fetchText();
   if (text === null || text === '') return false;
   try {
     const parsed = JSON.parse(text);
@@ -228,26 +211,24 @@ export function hasSave() {
   }
 }
 
-// Wipe the stored save and hand back a fresh default (the game reloads
-// right after calling this).
+// Wipe the stored save and hand back a fresh default. The game reloads
+// right after calling this.
 export function resetSave() {
-  clearStoredText();
+  clearText();
   return createDefaultSave();
 }
 
-// ---------------------------------------------------------------------------
-// Stats helpers: fold one run's numbers into the lifetime save.
-// ---------------------------------------------------------------------------
-
-// Add one run's stats to the lifetime totals and refresh the best-run
-// records. The returned save is not written to storage by itself.
+// ---------------------------------------------------------- run statistics
+// Fold one run's numbers into the lifetime totals and refresh the best-run
+// records. Only positive gains count. The returned save is not written to
+// storage by itself.
 export function recordBestRun(saveData, runStats) {
   const save = sanitizeSave(saveData);
-  const run = objectOr(runStats);
+  const run = toObject(runStats);
   for (const key of Object.keys(save.stats)) {
-    const gain = finiteOr(run[key], 0);
+    const gain = toNumber(run[key], 0);
     if (gain > 0) {
-      save.stats[key] = wholeOr(save.stats[key] + gain, save.stats[key], 0, MAX_STAT);
+      save.stats[key] = toClampedInt(save.stats[key] + gain, save.stats[key], 0, STAT_CAP);
     }
   }
   save.best.cash = Math.max(save.best.cash, save.cash);
@@ -259,28 +240,26 @@ export function recordBestRun(saveData, runStats) {
   return save;
 }
 
-// Add cash to a save object and count it toward lifetime earnings.
-// Returns the updated save. Does not write to storage by itself.
+// Add cash to a save object and count it toward lifetime earnings. Only
+// positive amounts count, and they are floored. Returns the updated save;
+// does not write to storage by itself.
 export function addCashToSave(saveData, amount) {
   const save = sanitizeSave(saveData);
-  const gain = finiteOr(amount, 0) > 0 ? Math.floor(amount) : 0;
-  save.cash = wholeOr(save.cash + gain, save.cash, 0, MAX_CASH);
-  save.stats.cashEarned = wholeOr(
-    save.stats.cashEarned + gain, save.stats.cashEarned, 0, MAX_LIFETIME_CASH,
+  const gain = toNumber(amount, 0) > 0 ? Math.floor(amount) : 0;
+  save.cash = toClampedInt(save.cash + gain, save.cash, 0, CASH_CAP);
+  save.stats.cashEarned = toClampedInt(
+    save.stats.cashEarned + gain, save.stats.cashEarned, 0, LIFETIME_CAP,
   );
   return save;
 }
 
-// ---------------------------------------------------------------------------
-// Manual backup: the whole save as text, and back again.
-// ---------------------------------------------------------------------------
-
+// ------------------------------------------------------------ manual backup
 export function exportSaveJSON() {
   return JSON.stringify(loadSave());
 }
 
-// Parse pasted backup text, store it if it is a valid save, and return the
-// stored save — or null when the text is not a save at all.
+// Parse pasted backup text, store it when it is a valid save, and return
+// the stored save — or null when the text is not a save at all.
 export function importSaveJSON(text) {
   if (typeof text !== 'string' || text.trim() === '') return null;
   try {

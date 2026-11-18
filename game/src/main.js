@@ -1,18 +1,24 @@
 // main.js — Solmar Bay bootstrap, game loop and state machine.
 //
-// This is the file that turns the Wave 1 modules into a playable game. It
-// builds the renderer and the city, wires every module together (with small
-// adapters where two modules describe the same thing differently — the city
-// hands out lanes as start/end pairs while the vehicle module wants point
-// lists, and the missions name places the city calls by other names), runs
-// the frame loop, and owns the state machine: menu / playing / paused /
-// phone / busted / wasted / mission-complete. It also owns the things no
-// single module owns: the player's health, the cash balance, the camera
-// while driving, shooting input, and the deterministic screenshot mode
-// (?shot=<name>&seed=<n> via shots.js).
+// This file turns the game modules into a playable game. It builds the
+// renderer and the city, wires every module together (with small adapters
+// where two modules describe the same thing differently — the city hands
+// out lanes as start/end pairs while the vehicle module wants point
+// lists, and the missions name places the city calls by other names),
+// runs the frame loop, and owns the state machine: menu / playing /
+// paused / phone / busted / wasted / mission-complete. It also owns the
+// things no single module owns: the player's health, the cash balance,
+// the camera while driving, shooting input, and the deterministic
+// screenshot mode (?shot=<name>&seed=<n>&cam=<mode> via shots.js).
 //
 // Nothing in here loads over the network: every import is a file under
 // game/, and three.js comes from the vendored import map in index.html.
+//
+// Performance note: the per-frame path allocates nothing. The input,
+// police, mission, HUD and minimap payloads are plain objects created
+// once and refilled every frame; the road network adapter is built once
+// after the city exists. A frame that hands the garbage collector work
+// is a frame that can stutter, so the hot loop stays allocation-free.
 
 import * as THREE from 'three';
 import {
@@ -51,7 +57,7 @@ import { readShotParams, applyShotStaging } from './shots.js';
 
 // The city returns lanes as {start, end, dir, ...}; vehicles and
 // pedestrians want lanes as {points: [{x,z}, ...], width}. Convert once.
-function lanesAsPointLists(world) {
+function toPointLanes(world) {
   return (world.lanes || []).map((lane) => ({
     points: [
       { x: lane.start.x, z: lane.start.z },
@@ -65,7 +71,7 @@ function lanesAsPointLists(world) {
 
 // The mission module names places (pier, alley, marina, chopShop, safehouse,
 // rooftop, jumps) that the city knows under other keys. Translate them.
-function makeMarkerLookup(world) {
+function buildMarkerLookup(world) {
   const markers = world.missionMarkers || {};
   const named = {
     garage: 'garage',
@@ -102,7 +108,7 @@ function makeMarkerLookup(world) {
   };
 }
 
-function randomRoadPointNear(world, centre, minRadius, maxRadius, rng) {
+function roadPointNearRing(world, centre, minRadius, maxRadius, rng) {
   for (let attempt = 0; attempt < 10; attempt += 1) {
     const angle = rng() * Math.PI * 2;
     const radius = minRadius + rng() * (maxRadius - minRadius);
@@ -147,7 +153,7 @@ const camera = new THREE.PerspectiveCamera(
 camera.position.set(20, 12, 34);
 
 const world = buildCity(scene, {});
-const pointLanes = lanesAsPointLists(world);
+const pointLanes = toPointLanes(world);
 const cityAdapter = {
   lanes: pointLanes,
   buildingColliders: world.colliders,
@@ -245,7 +251,7 @@ const combat = createCombatSystem({
   onReload: () => audio.reload(),
 });
 
-const markerCity = makeMarkerLookup(world);
+const markerCity = buildMarkerLookup(world);
 const missions = createMissionManager({
   scene,
   city: markerCity,
@@ -282,6 +288,116 @@ const pickupMeshes = [];
 vehicles.spawnParked(10);
 vehicles.spawnTraffic(12);
 vehicles.spawnBikes(5);
+
+// ---------------------------------------------------------------------------
+// Reused per-frame payloads (created once, refilled every frame — see the
+// performance note at the top of the file). Nothing below is allocated
+// inside stepGame.
+// ---------------------------------------------------------------------------
+
+const rng = createRng(20261117);
+
+// The road network adapter the police module wants, built once: it closes
+// over the world and the rng, both of which never change after boot.
+const roadNetwork = {
+  nearestRoadPoint: (pos) => world.nearestRoadPoint(pos.x, pos.z),
+  randomRoadPointNear: (pos, minR, maxR) =>
+    roadPointNearRing(world, pos, minR, maxR, rng.next.bind(rng)),
+};
+
+const input = {
+  forward: false,
+  back: false,
+  left: false,
+  right: false,
+  run: false,
+  brake: false,
+  handbrake: false,
+  enterPressed: false,
+  stealPressed: false,
+  lookDX: 0,
+  lookDY: 0,
+};
+
+const policeCtx = {
+  playerPosition: null,
+  playerInCar: false,
+  playerHealth: 100,
+  playerCarHealth: null,
+  playerCar: null,
+  playerCarPosition: null,
+  roadNetwork,
+  policeStation: world.spawnPoints.policeStation,
+};
+
+const missionCtx = {
+  playerPos: null,
+  inVehicle: false,
+  carryingTargetCar: false,
+  stolenTargetCar: false,
+  stolenCarId: undefined,
+  stolenCarModel: undefined,
+  busted: false,
+  wasted: false,
+};
+
+const hudSnapshot = {
+  health: 100,
+  cash: 0,
+  stars: 0,
+  speedMps: 0,
+  weaponName: 'fists',
+  ammoInMag: 0,
+  ammoReserve: 0,
+  reloading: false,
+  clockHour: 0,
+  clockMinute: 0,
+  objective: null,
+  prompt: '',
+  driving: false,
+  aiming: false,
+};
+
+const minimapData = {
+  playerX: 0,
+  playerZ: 0,
+  playerHeading: 0,
+  driving: false,
+  traffic: [],
+  police: null,
+  marker: null,
+  pickups: null,
+  roads: world.roadSegments,
+  worldRadius: MINIMAP.worldRadius,
+};
+const minimapPointPool = [];
+
+// Refill the minimap traffic list in place, reusing point objects.
+function fillMinimapTraffic() {
+  const list = minimapData.traffic;
+  list.length = 0;
+  let n = 0;
+  const pushPoint = (x, z) => {
+    let point = minimapPointPool[n];
+    if (!point) {
+      point = { x: 0, z: 0 };
+      minimapPointPool[n] = point;
+    }
+    point.x = x;
+    point.z = z;
+    list.push(point);
+    n += 1;
+  };
+  for (const car of vehicles.traffic) {
+    pushPoint(car.group.position.x, car.group.position.z);
+  }
+  // Motorbikes are traffic too: they read as grey dots like the cars.
+  for (const bike of vehicles.bikes) {
+    pushPoint(bike.group.position.x, bike.group.position.z);
+  }
+}
+
+const threats = [];
 
 // ---------------------------------------------------------------------------
 // Input
@@ -365,7 +481,6 @@ let endKind = null;
 let shotFramesRendered = 0;
 let shotStaged = false;
 let shotCameraMode = null; // set by shots.js staging ('chase' = reverse angle)
-const rng = createRng(20261117);
 
 function showOverlay(id) {
   for (const name of ['menu-overlay', 'pause-overlay', 'phone-overlay', 'end-overlay']) {
@@ -688,12 +803,12 @@ function updateDrivingCamera(dt) {
   if (!car) return;
   const fwdX = -Math.sin(car.heading);
   const fwdZ = -Math.cos(car.heading);
+  const rightX = Math.cos(car.heading);
+  const rightZ = -Math.sin(car.heading);
   if (shotCameraMode === 'chase') {
     // Reverse angle for the staged chase: the camera sits ahead of Leo's
     // car and looks back down the road, so the patrol cars behind him are
     // in the frame instead of hidden behind the camera.
-    const rightX = Math.cos(car.heading);
-    const rightZ = -Math.sin(car.heading);
     cameraDesired.set(
       car.group.position.x + fwdX * 14 + rightX * 4,
       CAMERA.drivingHeight,
@@ -704,6 +819,41 @@ function updateDrivingCamera(dt) {
       car.group.position.x - fwdX * 10,
       1.6,
       car.group.position.z - fwdZ * 10,
+    );
+    camera.lookAt(cameraTarget);
+    return;
+  }
+  if (shotCameraMode === 'chase-wide') {
+    // Same reverse angle, pulled back and up: the whole patrol pack,
+    // bike included, reads in one frame.
+    cameraDesired.set(
+      car.group.position.x + fwdX * 22 + rightX * 6,
+      CAMERA.drivingHeight + 3,
+      car.group.position.z + fwdZ * 22 + rightZ * 6,
+    );
+    camera.position.lerp(cameraDesired, Math.min(1, dt * 5));
+    cameraTarget.set(
+      car.group.position.x - fwdX * 16,
+      1.6,
+      car.group.position.z - fwdZ * 16,
+    );
+    camera.lookAt(cameraTarget);
+    return;
+  }
+  if (shotCameraMode === 'drive-side') {
+    // Side profile: the camera sits off Leo's right flank and looks
+    // forward past him, so the supercar's shape and the road ahead —
+    // including the oncoming bike — share the frame.
+    cameraDesired.set(
+      car.group.position.x - fwdX * 6 + rightX * 10,
+      4.5,
+      car.group.position.z - fwdZ * 6 + rightZ * 10,
+    );
+    camera.position.lerp(cameraDesired, Math.min(1, dt * 5));
+    cameraTarget.set(
+      car.group.position.x + fwdX * 14,
+      1.4,
+      car.group.position.z + fwdZ * 14,
     );
     camera.lookAt(cameraTarget);
     return;
@@ -745,19 +895,19 @@ function stepGame(dt) {
   const hour = Math.floor(clockMinutes / 60) % 24;
   const minute = Math.floor(clockMinutes % 60);
 
-  const input = {
-    forward: Boolean(keys.KeyW),
-    back: Boolean(keys.KeyS),
-    left: Boolean(keys.KeyA),
-    right: Boolean(keys.KeyD),
-    run: Boolean(keys.ShiftLeft || keys.ShiftRight),
-    brake: Boolean(keys.Space),
-    handbrake: Boolean(keys.Space),
-    enterPressed,
-    stealPressed,
-    lookDX,
-    lookDY,
-  };
+  // Refill the shared input object (no fresh object per frame). Shift is
+  // run on foot and the sport-car boost while driving.
+  input.forward = Boolean(keys.KeyW);
+  input.back = Boolean(keys.KeyS);
+  input.left = Boolean(keys.KeyA);
+  input.right = Boolean(keys.KeyD);
+  input.run = Boolean(keys.ShiftLeft || keys.ShiftRight);
+  input.brake = Boolean(keys.Space);
+  input.handbrake = Boolean(keys.Space);
+  input.enterPressed = enterPressed;
+  input.stealPressed = stealPressed;
+  input.lookDX = lookDX;
+  input.lookDY = lookDY;
 
   // Player on foot (camera handled inside when on foot).
   player.update(dt, input, camera);
@@ -777,20 +927,13 @@ function stepGame(dt) {
 
   // Wanted level, pursuit, busted / wasted.
   const playerCar = vehicles.playerCar;
-  const policeEvents = police.update(dt, {
-    playerPosition: player.group.position,
-    playerInCar: player.inVehicle,
-    playerHealth: health,
-    playerCarHealth: playerCar ? playerCar.health : null,
-    playerCar,
-    playerCarPosition: playerCar ? playerCar.group.position : null,
-    roadNetwork: {
-      nearestRoadPoint: (pos) => world.nearestRoadPoint(pos.x, pos.z),
-      randomRoadPointNear: (pos, minR, maxR) =>
-        randomRoadPointNear(world, pos, minR, maxR, rng.next.bind(rng)),
-    },
-    policeStation: world.spawnPoints.policeStation,
-  });
+  policeCtx.playerPosition = player.group.position;
+  policeCtx.playerInCar = player.inVehicle;
+  policeCtx.playerHealth = health;
+  policeCtx.playerCarHealth = playerCar ? playerCar.health : null;
+  policeCtx.playerCar = playerCar;
+  policeCtx.playerCarPosition = playerCar ? playerCar.group.position : null;
+  const policeEvents = police.update(dt, policeCtx);
   if (policeEvents.busted) enterEndState('busted');
   if (policeEvents.wasted) enterEndState('wasted');
 
@@ -803,24 +946,22 @@ function stepGame(dt) {
   combat.update(dt);
 
   // Missions: objectives, markers, pickups, steals.
-  const missionCtx = {
-    playerPos: player.group.position,
-    inVehicle: player.inVehicle,
-    carryingTargetCar: Boolean(lastStolenCar && player.inVehicle),
-    stolenTargetCar,
-    stolenCarId: lastStolenCarId && playSeconds - lastStolenAt < 0.5
-      ? lastStolenCarId
-      : undefined,
-    stolenCarModel: lastStolenCar ? lastStolenCar.type : undefined,
-    busted: state === 'busted',
-    wasted: state === 'wasted',
-  };
+  missionCtx.playerPos = player.group.position;
+  missionCtx.inVehicle = player.inVehicle;
+  missionCtx.carryingTargetCar = Boolean(lastStolenCar && player.inVehicle);
+  missionCtx.stolenTargetCar = stolenTargetCar;
+  missionCtx.stolenCarId = lastStolenCarId && playSeconds - lastStolenAt < 0.5
+    ? lastStolenCarId
+    : undefined;
+  missionCtx.stolenCarModel = lastStolenCar ? lastStolenCar.type : undefined;
+  missionCtx.busted = state === 'busted';
+  missionCtx.wasted = state === 'wasted';
   const missionEvents = missions.update(dt, missionCtx);
   for (const event of missionEvents) handleMissionEvent(event);
   stolenTargetCar = false;
 
   // Pedestrians walk the sidewalks and flee from danger.
-  const threats = [];
+  threats.length = 0;
   if (player.inVehicle && playerCar && Math.abs(playerCar.speed) > 14) {
     threats.push({ x: player.group.position.x, z: player.group.position.z, radius: 12 });
   }
@@ -842,43 +983,30 @@ function stepGame(dt) {
   // HUD + minimap + sound, from one snapshot.
   const objective = missions.getCurrentObjective();
   const ammo = combat.getAmmo();
-  hud.update({
-    health,
-    cash,
-    stars: police.getWantedLevel(),
-    speedMps: playerCar ? playerCar.speed : player.speed,
-    weaponName: combat.getWeapon(),
-    ammoInMag: ammo.inMagazine,
-    ammoReserve: ammo.reserve,
-    reloading: ammo.reloading,
-    clockHour: hour,
-    clockMinute: minute,
-    objective,
-    prompt: currentPrompt(),
-    driving: player.inVehicle,
-    aiming: !player.inVehicle && combat.getWeapon() === 'pistol',
-  }, dt);
-  const policeBlips = police.getBlips();
-  hud.drawMinimap({
-    playerX: player.group.position.x,
-    playerZ: player.group.position.z,
-    playerHeading: player.inVehicle && playerCar ? playerCar.heading : player.heading,
-    driving: player.inVehicle,
-    traffic: [
-      ...vehicles.traffic.map((car) => ({
-        x: car.group.position.x, z: car.group.position.z,
-      })),
-      // Motorbikes are traffic too: they read as grey dots like the cars.
-      ...vehicles.bikes.map((bike) => ({
-        x: bike.group.position.x, z: bike.group.position.z,
-      })),
-    ],
-    police: policeBlips,
-    marker: missions.getMarkerTarget(),
-    pickups,
-    roads: world.roadSegments,
-    worldRadius: MINIMAP.worldRadius,
-  }, dt);
+  hudSnapshot.health = health;
+  hudSnapshot.cash = cash;
+  hudSnapshot.stars = police.getWantedLevel();
+  hudSnapshot.speedMps = playerCar ? playerCar.speed : player.speed;
+  hudSnapshot.weaponName = combat.getWeapon();
+  hudSnapshot.ammoInMag = ammo.inMagazine;
+  hudSnapshot.ammoReserve = ammo.reserve;
+  hudSnapshot.reloading = ammo.reloading;
+  hudSnapshot.clockHour = hour;
+  hudSnapshot.clockMinute = minute;
+  hudSnapshot.objective = objective;
+  hudSnapshot.prompt = currentPrompt();
+  hudSnapshot.driving = player.inVehicle;
+  hudSnapshot.aiming = !player.inVehicle && combat.getWeapon() === 'pistol';
+  hud.update(hudSnapshot, dt);
+  fillMinimapTraffic();
+  minimapData.playerX = player.group.position.x;
+  minimapData.playerZ = player.group.position.z;
+  minimapData.playerHeading = player.inVehicle && playerCar ? playerCar.heading : player.heading;
+  minimapData.driving = player.inVehicle;
+  minimapData.police = police.getBlips();
+  minimapData.marker = missions.getMarkerTarget();
+  minimapData.pickups = pickups;
+  hud.drawMinimap(minimapData, dt);
   const speed01 = playerCar ? Math.abs(playerCar.speed) / 34 : 0;
   audio.update(speed01, player.inVehicle, police.getWantedLevel());
 
@@ -944,7 +1072,7 @@ function animate() {
       },
       startMissionSafe: (id) => missions.startMission(id),
     };
-    applyShotStaging(shotCtx, shotParams.name, shotParams.seed);
+    applyShotStaging(shotCtx, shotParams.name, shotParams.seed, shotParams.cam);
     shotCameraMode = shotCtx.cameraMode || null;
     hud.show();
   }

@@ -1,20 +1,21 @@
 // player.js — Leo Marlow on foot in Marisol Bay.
 //
-// This module is the on-foot half of the player. It builds Leo as a small
-// articulated figure out of plain three.js shapes, moves him around the
-// city with WASD, keeps a third-person camera trailing behind him, and
-// hands him over to the vehicle system when he climbs into a car (E) and
-// takes him back when he steps out again. Driving physics, traffic and
-// car theft live in vehicles.js; this file only owns the walking body.
+// The on-foot half of the player. Leo is a small articulated figure built
+// from plain three.js shapes: he walks the city on WASD, a third-person
+// camera trails behind him, and E hands him to the vehicle system when he
+// climbs into a car — and takes him back when he steps out. Driving,
+// traffic and car theft live in vehicles.js; this file only owns the
+// walking body.
 //
-// What other modules call (the contract — keep every name and signature):
+// The contract other modules rely on (every name and signature stays):
 //   createPlayer(scene, options)
 //     options.city     — city data; playerSpawn, bounds, buildingColliders.
-//                        Everything is optional; open ground is the fallback.
-//     options.vehicles — the vehicle system, or attach later with bindVehicles.
+//                        All optional; open ground is the fallback.
+//     options.vehicles — the vehicle system, or attach later with
+//                        bindVehicles.
 //     Returns the player:
-//       player.group            — THREE.Group in the scene; .position is Leo's
-//                                 feet on the ground, .rotation.y his facing.
+//       player.group            — THREE.Group in the scene; .position is
+//                                 Leo's feet, .rotation.y his facing.
 //       player.heading          — facing angle, radians, 0 faces -Z.
 //       player.speed            — current ground speed, metres per second.
 //       player.inVehicle        — true while Leo is inside a car.
@@ -31,36 +32,37 @@
 //       player.isDriving()      — same as reading player.inVehicle.
 //       player.dispose()        — take Leo's body out of the scene.
 //
-// Entering a car: on foot, E asks the vehicle system for the nearest car in
-// reach; if one answers, the vehicle system takes over and this module hides
-// Leo. E again while driving asks the vehicle system to park and hand Leo
-// back, and he steps out in front of the car. Stealing with F is the
-// vehicle system's job, not this file's.
+// Entering a car: on foot, E asks the vehicle system for the nearest car
+// in reach; if one answers, the vehicle system takes over and this module
+// hides Leo. E again while driving asks the vehicle system to park and
+// hand Leo back, and he steps out in front of the car. Stealing with F is
+// the vehicle system's job, not this file's.
 
 import * as THREE from 'three';
 import { PLAYER } from './config.js';
-import {
-  clamp,
-  lerpAngle,
-  moveTowards,
-  resolveCircleColliders,
-} from './utils.js';
+import { clamp } from './utils.js';
 
-// Follow-camera geometry and feel. The camera trails behind Leo and eases
-// toward its spot instead of snapping, so turning never whips the view.
-const FOLLOW_DISTANCE = 7.5; // metres behind Leo's heels
-const FOLLOW_HEIGHT = 3.4; // metres above the pavement
-const AIM_HEIGHT = 1.6; // metres up Leo's body the camera looks at
-const LOOK_AHEAD = 2.5; // metres in front of Leo the camera aims past
-const MOUSE_SENSITIVITY = 0.0028; // radians of yaw per pixel of mouse travel
-const YAW_DRIFT_RECOVERY = 0.9; // per second the mouse offset eases back
-const ACCELERATION = 26; // metres per second squared, speeding up
-const BRAKING = 36; // metres per second squared, slowing down
-const EXIT_FORWARD_OFFSET = 2.4; // metres ahead of the car when stepping out
+// Follow camera: trails behind Leo and eases into place instead of
+// snapping, so turning never whips the view around.
+const CAM_BEHIND = 7.5; // metres behind Leo's heels
+const CAM_HEIGHT = 3.4; // metres above the pavement
+const CAM_LOOK_Y = 1.6; // metres up Leo's body the camera looks at
+const CAM_LOOK_FWD = 2.5; // metres past Leo the camera aims at
+const MOUSE_SENS = 0.0028; // radians of yaw per pixel of mouse travel
+const DRIFT_DECAY = 0.9; // per second the mouse offset relaxes back to zero
+const STEP_OUT_DIST = 2.4; // metres ahead of the car when stepping out
 
-// Leo's look: a teal jacket over a pale shirt, dark jeans, warm skin and
+// Dust puffs: a tiny pre-made pool, created once at startup and reused —
+// never allocated while the game runs. A puff lives half a second.
+const POOL_SIZE = 8;
+const PUFF_SPAN = 0.5; // seconds one puff lasts
+const PUFF_EVERY = 0.12; // seconds between puffs while running
+const PUFF_LIFT = 0.7; // metres per second a puff drifts up
+const DUST_TINT = 0xcbb28a; // dry golden-hour dust
+
+// Leo's look: a teal jacket over a pale shirt, dark jeans, warm skin,
 // dark hair. An original character, drawn only from boxes and spheres.
-const LEO_COLORS = {
+const PALETTE = {
   skin: 0xc98d64,
   hair: 0x2b1d12,
   jacket: 0x1f7a6d,
@@ -70,24 +72,24 @@ const LEO_COLORS = {
 };
 
 // ---------------------------------------------------------------------------
-// The figure: a small articulated humanoid. Every limb hangs from a pivot
-// group at its shoulder or hip, so the walk cycle can swing the limbs like
-// pendulums around those joints.
+// The figure. Limbs hang from pivot groups at shoulders and hips, so the
+// walk cycle can swing them like pendulums around those joints. Parts are
+// listed as data (material, size, offset) and stamped out by one helper,
+// which keeps the builder a flat list instead of nested code.
 // ---------------------------------------------------------------------------
-function makeLeoFigure() {
-  const root = new THREE.Group();
-  root.name = 'LeoMarlow';
+function assembleLeo() {
+  const body = new THREE.Group();
+  body.name = 'LeoMarlow';
 
-  const skinMat = new THREE.MeshStandardMaterial({ color: LEO_COLORS.skin, roughness: 0.75 });
-  const hairMat = new THREE.MeshStandardMaterial({ color: LEO_COLORS.hair, roughness: 0.9 });
-  const jacketMat = new THREE.MeshStandardMaterial({ color: LEO_COLORS.jacket, roughness: 0.85 });
-  const shirtMat = new THREE.MeshStandardMaterial({ color: LEO_COLORS.shirt, roughness: 0.9 });
-  const jeansMat = new THREE.MeshStandardMaterial({ color: LEO_COLORS.jeans, roughness: 0.9 });
-  const shoeMat = new THREE.MeshStandardMaterial({ color: LEO_COLORS.shoes, roughness: 0.8 });
+  const skinMat = new THREE.MeshStandardMaterial({ color: PALETTE.skin, roughness: 0.75 });
+  const hairMat = new THREE.MeshStandardMaterial({ color: PALETTE.hair, roughness: 0.9 });
+  const jacketMat = new THREE.MeshStandardMaterial({ color: PALETTE.jacket, roughness: 0.85 });
+  const shirtMat = new THREE.MeshStandardMaterial({ color: PALETTE.shirt, roughness: 0.9 });
+  const jeansMat = new THREE.MeshStandardMaterial({ color: PALETTE.jeans, roughness: 0.9 });
+  const shoeMat = new THREE.MeshStandardMaterial({ color: PALETTE.shoes, roughness: 0.8 });
 
-  // One box, placed once, casting a shadow. Everything below is built from
-  // this helper so the figure stays a flat list of parts, not nested code.
-  function box(material, size, at, parent) {
+  // One box, placed once, casting a shadow.
+  function placeBox(material, size, at, parent) {
     const mesh = new THREE.Mesh(new THREE.BoxGeometry(size[0], size[1], size[2]), material);
     mesh.position.set(at[0], at[1], at[2]);
     mesh.castShadow = true;
@@ -96,33 +98,33 @@ function makeLeoFigure() {
   }
 
   // Jacket torso with a pale shirt panel down the front, then hips.
-  box(jacketMat, [0.52, 0.62, 0.3], [0, 1.18, 0], root);
-  box(shirtMat, [0.3, 0.5, 0.04], [0, 1.18, 0.16], root);
-  box(jeansMat, [0.5, 0.22, 0.3], [0, 0.82, 0], root);
+  placeBox(jacketMat, [0.52, 0.62, 0.3], [0, 1.18, 0], body);
+  placeBox(shirtMat, [0.3, 0.5, 0.04], [0, 1.18, 0.16], body);
+  placeBox(jeansMat, [0.5, 0.22, 0.3], [0, 0.82, 0], body);
 
   // Head: a skin sphere, a hair cap over the top half, and a fringe slab.
   const head = new THREE.Mesh(new THREE.SphereGeometry(0.21, 20, 16), skinMat);
   head.position.set(0, 1.68, 0);
   head.castShadow = true;
-  root.add(head);
+  body.add(head);
   const hairCap = new THREE.Mesh(
     new THREE.SphereGeometry(0.215, 20, 12, 0, Math.PI * 2, 0, Math.PI * 0.55),
     hairMat,
   );
   hairCap.position.set(0, 1.72, -0.01);
-  root.add(hairCap);
-  box(hairMat, [0.34, 0.08, 0.1], [0, 1.82, 0.14], root);
+  body.add(hairCap);
+  placeBox(hairMat, [0.34, 0.08, 0.1], [0, 1.82, 0.14], body);
 
   // An arm is a pivot at the shoulder holding a jacket sleeve and a hand.
   function buildArm(side) {
     const pivot = new THREE.Group();
     pivot.position.set(0.31 * side, 1.44, 0);
-    box(jacketMat, [0.15, 0.52, 0.17], [0, -0.26, 0], pivot);
+    placeBox(jacketMat, [0.15, 0.52, 0.17], [0, -0.26, 0], pivot);
     const hand = new THREE.Mesh(new THREE.SphereGeometry(0.075, 10, 8), skinMat);
     hand.position.set(0, -0.55, 0);
     hand.castShadow = true;
     pivot.add(hand);
-    root.add(pivot);
+    body.add(pivot);
     return pivot;
   }
 
@@ -130,14 +132,14 @@ function makeLeoFigure() {
   function buildLeg(side) {
     const pivot = new THREE.Group();
     pivot.position.set(0.14 * side, 0.74, 0);
-    box(jeansMat, [0.19, 0.6, 0.21], [0, -0.3, 0], pivot);
-    box(shoeMat, [0.2, 0.09, 0.32], [0, -0.64, 0.04], pivot);
-    root.add(pivot);
+    placeBox(jeansMat, [0.19, 0.6, 0.21], [0, -0.3, 0], pivot);
+    placeBox(shoeMat, [0.2, 0.09, 0.32], [0, -0.64, 0.04], pivot);
+    body.add(pivot);
     return pivot;
   }
 
   return {
-    root,
+    root: body,
     armLeft: buildArm(-1),
     armRight: buildArm(1),
     legLeft: buildLeg(-1),
@@ -154,48 +156,126 @@ export function createPlayer(scene, options = {}) {
   const walls = town.buildingColliders || [];
   const start = town.playerSpawn || { x: 0, z: 12, heading: 0 };
 
-  const figure = makeLeoFigure();
+  const figure = assembleLeo();
   const root = figure.root;
   root.position.set(start.x, 0, start.z);
   scene.add(root);
 
   // All mutable state in one place, so the methods below stay short.
-  const rig = {
+  const state = {
     heading: start.heading || 0,
     speed: 0,
     cycle: 0, // walk-cycle phase; drives the limb swing
-    yawDrift: 0, // mouse-look offset from "straight behind Leo"
+    drift: 0, // mouse-look offset from "straight behind Leo"
     inCar: false,
     car: null,
     vehicles: options.vehicles || null,
   };
-  root.rotation.y = rig.heading;
+  root.rotation.y = state.heading;
 
-  const scratch = new THREE.Vector3();
+  const eye = new THREE.Vector3();
 
-  // Keep a point inside the city rectangle.
-  function keepInCity(x, z) {
-    return {
-      x: clamp(x, limits.minX, limits.maxX),
-      z: clamp(z, limits.minZ, limits.maxZ),
-    };
+  // One scratch point, reused every frame: pushing Leo out of building
+  // walls writes its answer here instead of allocating a fresh object.
+  const wallOut = { x: 0, z: 0 };
+
+  // Push a circle out of every building wall, in place. Closest point,
+  // push out along the overlap, or out through the nearest face when the
+  // centre is inside the box; the answer lands in `out`.
+  function pushOutOfWalls(x, z, radius, out) {
+    let px = x;
+    let pz = z;
+    for (const c of walls) {
+      const nearX = clamp(px, c.minX, c.maxX);
+      const nearZ = clamp(pz, c.minZ, c.maxZ);
+      const dx = px - nearX;
+      const dz = pz - nearZ;
+      const distSq = dx * dx + dz * dz;
+      if (distSq >= radius * radius) continue;
+      if (distSq > 1e-9) {
+        const dist = Math.sqrt(distSq);
+        const push = radius - dist;
+        px += (dx / dist) * push;
+        pz += (dz / dist) * push;
+      } else {
+        const toLeft = px - c.minX + radius;
+        const toRight = c.maxX - px + radius;
+        const toTop = pz - c.minZ + radius;
+        const toBottom = c.maxZ - pz + radius;
+        const smallest = Math.min(toLeft, toRight, toTop, toBottom);
+        if (smallest === toLeft) px = c.minX - radius;
+        else if (smallest === toRight) px = c.maxX + radius;
+        else if (smallest === toTop) pz = c.minZ - radius;
+        else pz = c.maxZ + radius;
+      }
+    }
+    out.x = px;
+    out.z = pz;
+  }
+
+  // Dust pool: one shared puff shape, one small material per puff (made
+  // once, here), each puff a mesh that starts hidden. Puffs are handed out
+  // round-robin and fade back out — nothing is created while playing.
+  const puffShape = new THREE.SphereGeometry(0.32, 8, 6);
+  const puffs = [];
+  for (let i = 0; i < POOL_SIZE; i += 1) {
+    const material = new THREE.MeshBasicMaterial({
+      color: DUST_TINT, transparent: true, opacity: 0, depthWrite: false,
+    });
+    const mesh = new THREE.Mesh(puffShape, material);
+    mesh.visible = false;
+    mesh.scale.set(1, 0.5, 1);
+    scene.add(mesh);
+    puffs.push({ mesh, material, life: 0 });
+  }
+  let puffCursor = 0;
+  let puffTimer = 0;
+
+  // Wake one pooled puff at Leo's feet. Cheap by design: the mesh and the
+  // material already exist; this only flips numbers on them.
+  function emitPuff(x, z) {
+    const puff = puffs[puffCursor];
+    puffCursor = (puffCursor + 1) % POOL_SIZE;
+    puff.life = PUFF_SPAN;
+    puff.mesh.position.set(x + (Math.random() - 0.5) * 0.5, 0.1, z + (Math.random() - 0.5) * 0.5);
+    puff.mesh.scale.set(0.7, 0.35, 0.7);
+    puff.mesh.visible = true;
+    puff.material.opacity = 0.4;
+  }
+
+  // Age every live puff: it rises, swells and fades out, then hides.
+  function agePuffs(dt) {
+    for (const puff of puffs) {
+      if (puff.life <= 0) continue;
+      puff.life -= dt;
+      if (puff.life <= 0) {
+        puff.mesh.visible = false;
+        puff.material.opacity = 0;
+        continue;
+      }
+      const gone = 1 - puff.life / PUFF_SPAN;
+      puff.mesh.position.y += PUFF_LIFT * dt;
+      const size = 0.7 + gone * 1.1;
+      puff.mesh.scale.set(size, size * 0.5, size);
+      puff.material.opacity = 0.4 * (1 - gone);
+    }
   }
 
   // Swing the limbs with the walk cycle while moving; ease them back to a
-  // relaxed idle stance (arms slightly out, a little bob gone) when still.
-  // A touch of idle breathing keeps Leo from looking frozen on the menu.
-  function stepWalkCycle(dt, moving) {
-    if (moving && rig.speed > 0.1) {
-      rig.cycle += dt * rig.speed * 2.0;
-      const swing = Math.min(0.8, 0.3 + rig.speed * 0.06);
-      const wave = Math.sin(rig.cycle);
+  // relaxed idle stance (arms slightly out, the bob gone) when still. A
+  // touch of idle breathing keeps Leo from looking frozen on the menu.
+  function playGait(dt, moving) {
+    if (moving && state.speed > 0.1) {
+      state.cycle += dt * state.speed * 2.0;
+      const swing = Math.min(0.8, 0.3 + state.speed * 0.06);
+      const wave = Math.sin(state.cycle);
       figure.legLeft.rotation.x = wave * swing;
       figure.legRight.rotation.x = -wave * swing;
       figure.armLeft.rotation.x = -wave * swing * 0.8;
       figure.armRight.rotation.x = wave * swing * 0.8;
       figure.armLeft.rotation.z = 0.08;
       figure.armRight.rotation.z = -0.08;
-      root.position.y = Math.abs(Math.cos(rig.cycle)) * 0.05;
+      root.position.y = Math.abs(Math.cos(state.cycle)) * 0.05;
     } else {
       const ease = Math.min(1, dt * 8);
       figure.legLeft.rotation.x *= 1 - ease;
@@ -210,21 +290,21 @@ export function createPlayer(scene, options = {}) {
 
   // Chase the spot behind Leo with a damped lerp, then look a little past
   // him so the street ahead stays in frame.
-  function followWithCamera(dt, camera) {
+  function trackCamera(dt, camera) {
     if (!camera) return;
-    const yaw = rig.heading + rig.yawDrift;
-    const behindX = Math.sin(yaw) * FOLLOW_DISTANCE;
-    const behindZ = Math.cos(yaw) * FOLLOW_DISTANCE;
-    scratch.set(
+    const yaw = state.heading + state.drift;
+    const behindX = Math.sin(yaw) * CAM_BEHIND;
+    const behindZ = Math.cos(yaw) * CAM_BEHIND;
+    eye.set(
       root.position.x + behindX,
-      FOLLOW_HEIGHT,
+      CAM_HEIGHT,
       root.position.z + behindZ,
     );
-    camera.position.lerp(scratch, Math.min(1, dt * 6));
+    camera.position.lerp(eye, Math.min(1, dt * 6));
     camera.lookAt(
-      root.position.x - Math.sin(yaw) * LOOK_AHEAD,
-      AIM_HEIGHT,
-      root.position.z - Math.cos(yaw) * LOOK_AHEAD,
+      root.position.x - Math.sin(yaw) * CAM_LOOK_FWD,
+      CAM_LOOK_Y,
+      root.position.z - Math.cos(yaw) * CAM_LOOK_FWD,
     );
   }
 
@@ -233,73 +313,79 @@ export function createPlayer(scene, options = {}) {
     group: root,
 
     get heading() {
-      return rig.heading;
+      return state.heading;
     },
     get speed() {
-      return rig.speed;
+      return state.speed;
     },
     get inVehicle() {
-      return rig.inCar;
+      return state.inCar;
     },
     get vehicle() {
-      return rig.car;
+      return state.car;
     },
 
     bindVehicles(system) {
-      rig.vehicles = system;
+      state.vehicles = system;
     },
 
     isDriving() {
-      return rig.inCar;
+      return state.inCar;
     },
 
     setPosition(x, z, newHeading) {
       root.position.set(x, 0, z);
       if (typeof newHeading === 'number') {
-        rig.heading = newHeading;
-        root.rotation.y = rig.heading;
+        state.heading = newHeading;
+        root.rotation.y = state.heading;
       }
-      rig.speed = 0;
+      state.speed = 0;
     },
 
     enterVehicle(vehicle) {
-      if (!vehicle || rig.inCar) return false;
-      rig.inCar = true;
-      rig.car = vehicle;
+      if (!vehicle || state.inCar) return false;
+      state.inCar = true;
+      state.car = vehicle;
       root.visible = false;
-      rig.speed = 0;
+      state.speed = 0;
       return true;
     },
 
     exitVehicle() {
-      if (!rig.inCar || !rig.car) return false;
-      const car = rig.car;
+      if (!state.inCar || !state.car) return false;
+      const car = state.car;
       // Step out in front of the car, where the street is, then make sure
       // the spot is inside the city and clear of building walls.
       const aheadX = -Math.sin(car.heading);
       const aheadZ = -Math.cos(car.heading);
-      const stepped = keepInCity(
-        car.group.position.x + aheadX * EXIT_FORWARD_OFFSET,
-        car.group.position.z + aheadZ * EXIT_FORWARD_OFFSET,
+      const steppedX = clamp(
+        car.group.position.x + aheadX * STEP_OUT_DIST, limits.minX, limits.maxX,
       );
-      const clear = resolveCircleColliders(stepped.x, stepped.z, PLAYER.radius, walls);
-      root.position.set(clear.x, 0, clear.z);
-      rig.heading = car.heading;
-      root.rotation.y = rig.heading;
+      const steppedZ = clamp(
+        car.group.position.z + aheadZ * STEP_OUT_DIST, limits.minZ, limits.maxZ,
+      );
+      pushOutOfWalls(steppedX, steppedZ, PLAYER.radius, wallOut);
+      root.position.set(wallOut.x, 0, wallOut.z);
+      emitPuff(wallOut.x, wallOut.z);
+      state.heading = car.heading;
+      root.rotation.y = state.heading;
       root.visible = true;
-      rig.inCar = false;
-      rig.car = null;
-      rig.speed = 0;
+      state.inCar = false;
+      state.car = null;
+      state.speed = 0;
       return true;
     },
 
     update(dt, input = {}, camera) {
+      // Dust keeps ageing even while Leo is in a car.
+      agePuffs(dt);
+
       // In a car Leo is hidden and the vehicle system drives; the only job
       // here is to catch "E to get out" and hand the request over.
-      if (rig.inCar) {
-        if (input.enterPressed && rig.vehicles
-          && typeof rig.vehicles.exitPlayerVehicle === 'function') {
-          rig.vehicles.exitPlayerVehicle();
+      if (state.inCar) {
+        if (input.enterPressed && state.vehicles
+          && typeof state.vehicles.exitPlayerVehicle === 'function') {
+          state.vehicles.exitPlayerVehicle();
         }
         return;
       }
@@ -308,11 +394,11 @@ export function createPlayer(scene, options = {}) {
       // straight-behind him, so the view never gets stuck sideways.
       // (lookDY is accepted for a future pitch control and ignored here —
       // the follow camera keeps a fixed height.)
-      if (input.lookDX) rig.yawDrift -= input.lookDX * MOUSE_SENSITIVITY;
-      rig.yawDrift *= Math.max(0, 1 - dt * YAW_DRIFT_RECOVERY);
+      if (input.lookDX) state.drift -= input.lookDX * MOUSE_SENS;
+      state.drift *= Math.max(0, 1 - dt * DRIFT_DECAY);
 
       // WASD moves relative to the camera: W walks away from the lens.
-      const viewYaw = rig.heading + rig.yawDrift;
+      const viewYaw = state.heading + state.drift;
       const forwardX = -Math.sin(viewYaw);
       const forwardZ = -Math.cos(viewYaw);
       const rightX = Math.cos(viewYaw);
@@ -343,41 +429,56 @@ export function createPlayer(scene, options = {}) {
         moveZ /= length;
       }
 
-      // Ease the speed toward its target instead of snapping, so Leo
-      // speeds up and slows down over a few steps.
+      // Instant response (no accel smoothing, no turn easing): the speed
+      // and the facing snap to what the keys ask for, so Leo moves the
+      // moment the player presses — never a beat late.
       const targetSpeed = moving ? (input.run ? PLAYER.runSpeed : PLAYER.walkSpeed) : 0;
-      rig.speed = moveTowards(rig.speed, targetSpeed, (targetSpeed > rig.speed ? ACCELERATION : BRAKING) * dt);
+      state.speed = targetSpeed;
 
       if (moving) {
-        // Turn to face the direction of travel, smoothly, never snapping.
-        const targetHeading = Math.atan2(-moveX, -moveZ);
-        rig.heading = lerpAngle(rig.heading, targetHeading, PLAYER.turnSpeed * dt);
-        root.rotation.y = rig.heading;
+        state.heading = Math.atan2(-moveX, -moveZ);
+        root.rotation.y = state.heading;
 
-        const next = keepInCity(
-          root.position.x + moveX * rig.speed * dt,
-          root.position.z + moveZ * rig.speed * dt,
+        const nextX = clamp(
+          root.position.x + moveX * state.speed * dt, limits.minX, limits.maxX,
         );
-        const clear = resolveCircleColliders(next.x, next.z, PLAYER.radius, walls);
-        root.position.x = clear.x;
-        root.position.z = clear.z;
+        const nextZ = clamp(
+          root.position.z + moveZ * state.speed * dt, limits.minZ, limits.maxZ,
+        );
+        pushOutOfWalls(nextX, nextZ, PLAYER.radius, wallOut);
+        root.position.x = wallOut.x;
+        root.position.z = wallOut.z;
+
+        // Running kicks up dust at Leo's heels, a puff every beat.
+        if (state.speed >= PLAYER.runSpeed) {
+          puffTimer -= dt;
+          if (puffTimer <= 0) {
+            emitPuff(root.position.x, root.position.z);
+            puffTimer = PUFF_EVERY;
+          }
+        } else {
+          puffTimer = 0;
+        }
+      } else {
+        puffTimer = 0;
       }
 
-      stepWalkCycle(dt, moving);
+      playGait(dt, moving);
 
       // E to climb in: ask the vehicle system for the closest car in reach.
-      if (input.enterPressed && rig.vehicles
-        && typeof rig.vehicles.nearestEnterableVehicle === 'function') {
-        const car = rig.vehicles.nearestEnterableVehicle(root.position, PLAYER.enterCarRange);
-        if (car && typeof rig.vehicles.enterPlayerVehicle === 'function') {
-          rig.vehicles.enterPlayerVehicle(car);
+      if (input.enterPressed && state.vehicles
+        && typeof state.vehicles.nearestEnterableVehicle === 'function') {
+        const car = state.vehicles.nearestEnterableVehicle(root.position, PLAYER.enterCarRange);
+        if (car && typeof state.vehicles.enterPlayerVehicle === 'function') {
+          state.vehicles.enterPlayerVehicle(car);
         }
       }
 
-      followWithCamera(dt, camera);
+      trackCamera(dt, camera);
     },
 
     dispose() {
+      for (const puff of puffs) scene.remove(puff.mesh);
       scene.remove(root);
     },
   };

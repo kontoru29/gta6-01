@@ -1,225 +1,211 @@
-// vehicles.js — every car and motorbike in Solmar Bay: factory, driving,
-// theft, traffic.
+// vehicles.js — every wheeled thing in Solmar Bay: cars, bikes, traffic.
 //
-// This module owns all vehicles. One car factory and one arcade driving
-// model serve both the player's car and the traffic cars, so a stolen
-// traffic car drives exactly like any other car. It covers:
-//   * procedural cars in six original body styles (sedan, hatchback, van,
-//     sport coupe, open-top roadster, low supercar) in bright coastal
-//     paint colours — no real-world models. The three sport cars are
-//     quicker than the rest and rare in traffic by design;
-//   * motorbikes: NPC riders who filter through traffic faster than the
-//     cars, sway across the lane and lean into every turn. Bikes are
-//     never enterable — they make the streets feel alive;
-//   * arcade driving: acceleration, steering, brake and handbrake, with
-//     simple circle-vs-building and car-vs-car collision;
-//   * stealing: walk up to a parked car or a car in traffic and press F to
-//     take it (a traffic driver bails out and runs off on foot);
-//   * traffic AI: cars follow the city module's road lanes, brake for the
-//     car ahead and swerve around a blocked lane, and never leave the road.
+// This module owns the garage and the street. The procedural car factory
+// builds six body styles out of boxes and cylinders; one shared arcade
+// driving model moves the player's car and the traffic cars alike, so a
+// stolen car handles exactly like the one it was. NPC motorbikes weave
+// through the same lanes, quicker and looser than the cars, and they are
+// never drivable — they are scenery that moves.
 //
-// Public interface (what main.js, player.js, police.js, missions.js and
-// hud.js call):
-//   createCar(scene, type, colour, x, z, heading)
-//     Build one car and add it to the scene. type is 'sedan' | 'hatchback' |
-//     'van' | 'sport'. Returns a car object:
-//       car.group, car.type, car.colour, car.heading, car.speed (m/s),
-//       car.health (0..100), car.isPlayer, car.isTraffic, car.stolen,
-//       car.driver (traffic driver marker, null once stolen),
-//       car.setSpeedKmh(), car.damage(amount), car.destroyed
-//   createVehicleSystem(scene, city, options)
-//     options.player — the player object from player.js (may be attached
-//                      later with system.bindPlayer(p)).
-//     options.onCarStolen(car) — callback fired when the player steals a car.
-//     Returns the system:
-//       system.cars            — every live car (player + traffic + parked)
-//       system.traffic         — the traffic cars only
-//       system.playerCar       — the car the player drives, or null
-//       system.bindPlayer(p)   — attach the player object
-//       system.spawnParked(count)  — scatter parked cars at city carSpawns
-//       system.spawnTraffic(count) — put AI cars on the city lanes
-//       system.nearestEnterableVehicle(pos, maxDist)
-//                              — closest car the player may enter with E
-//       system.enterPlayerVehicle(car) — player gets in (E key)
-//       system.exitPlayerVehicle()     — player gets out (E key)
-//       system.trySteal(playerPos)     — F key: steal nearest car in reach
-//       system.getPlayerSpeedKmh()     — HUD speedometer reading (0 on foot)
-//       system.isPlayerDriving()       — true while the player is in a car
-//       system.damagePlayerCar(amount) — police module: smash / stop the car
-//       system.stopPlayerCar()         — police module: kill the engine
-//       system.update(dt, input)       — one frame: drive the player car,
-//                                        run traffic AI, resolve collisions.
-//                                        input is { forward, back, left,
-//                                        right, brake, handbrake,
-//                                        enterPressed, stealPressed }
-//       system.dispose()       — remove all cars from the scene
+// The sport garage:
+//   * sport coupe, open-top roadster and low supercar — faster than the
+//     everyday bodies, rarer on the street, painted in loud colours;
+//   * boost: hold Shift in a sport body for an instant surge. The meter
+//     drains in about 1.5 s and refills in about 4 s, and the brake
+//     lights flare whenever the car brakes or reverses;
+//   * NPC bikes: slim two-wheelers with a leaning rider, faster than the
+//     cars, swaying across the lane as they filter past traffic.
 //
-// What this module expects from the city module (all optional — a default
-// street grid is used when the city data is not there yet):
-//   city.lanes — array of lanes, each { points: [{x, z}, ...], width }.
-//                A lane is one direction of one road. Traffic follows the
-//                points in order and loops back to the start.
-//   city.buildingColliders — array of { minX, maxX, minZ, maxZ }.
-//   city.carSpawns — array of { x, z, heading } parking spots.
-//   city.bounds — { minX, maxX, minZ, maxZ } of the drivable city.
+// What other modules use (main.js, player.js, police.js, missions.js, hud.js):
+//   createCar(scene, type, colour, x, z, heading) — one car in the scene.
+//     Car fields: group, type, colour, heading, speed, steer, health,
+//     destroyed, isPlayer, isTraffic, stolen, driver, takenByPlayer,
+//     length, width, engineDead, boostMeter, boosting, rearLightMat,
+//     laneIndex, waypointIndex, cruiseSpeed, speedKmh getter,
+//     damage(amount), dispose().
+//   createMotorbike(scene, x, z, heading, colour) — one NPC bike.
+//     Fields: group, leanGroup, type, colour, heading, speed, isTraffic,
+//     laneIndex, waypointIndex, cruiseSpeed, weavePhase, weaveClock,
+//     lean, speedKmh getter, dispose().
+//   createVehicleSystem(scene, city, options) — the system object:
+//     cars, traffic, bikes, playerCar getter, bindPlayer(p),
+//     spawnParked(n), spawnTraffic(n), spawnBikes(n),
+//     spawnCarAt(type, colour, x, z, heading),
+//     spawnBikeAt(x, z, heading, colour),
+//     nearestEnterableVehicle(pos, maxDist),
+//     enterPlayerVehicle(car), exitPlayerVehicle(), trySteal(playerPos),
+//     getPlayerSpeedKmh(), isPlayerDriving(),
+//     damagePlayerCar(amount), stopPlayerCar(),
+//     update(dt, input), dispose().
 //
-// A car the player drives keeps its traffic driver slot empty; a traffic car
-// keeps a simple driver record so the steal flow can make the driver flee.
+// The city argument is optional: with no lanes, colliders or spawns the
+// module falls back to a default 5x5 street grid.
 
 import * as THREE from 'three';
 
 // ---------------------------------------------------------------------------
-// Tuning — local to this module so it works before the city agent's
-// config.js exists. Same values the integrator can move into config later.
+// Tuning — every number that shapes how driving feels, in one place.
 // ---------------------------------------------------------------------------
+
 const TOP_SPEED = {
-  sedan: 34, // ~122 km/h
-  hatchback: 30, // ~108 km/h
-  van: 25, // ~90 km/h
-  sport: 44, // ~158 km/h
-  roadster: 48, // ~173 km/h, open-top two-seater
-  supercar: 52, // ~187 km/h, the fastest thing on the island
+  sedan: 34,
+  hatchback: 30,
+  van: 25,
+  sport: 44,
+  roadster: 48,
+  supercar: 52,
 };
 const ACCEL = { sedan: 13, hatchback: 12, van: 9, sport: 18, roadster: 20, supercar: 22 };
 const BRAKE_FORCE = 30;
 const REVERSE_TOP_SPEED = 9;
-const STEER_RATE = 1.9; // radians per second at full lock, low speed
-const GRIP = 3.2; // how fast the car settles back to straight driving
-const HANDBRAKE_GRIP = 0.9; // low grip while handbraking = sliding
-const CAR_RADIUS = 1.35; // collision circle around a car's centre
-const STEAL_RANGE = 3.6; // how close the player must be to press F
-const TRAFFIC_CRUISE = 11; // m/s, about 40 km/h — calm city traffic
-const TRAFFIC_BRAKE_AHEAD = 9; // metres: brake for the car ahead
-const TRAFFIC_SWERVE_AHEAD = 14; // metres: start steering around a block
-const TRAFFIC_DESPAWN = 130; // metres from player before a traffic car respawns
+const STEER_RATE = 1.9;
+// Steering answers the keys almost at once — the car must feel instant.
+const STEER_RESPONSE = 10;
+const GRIP = 3.2;
+const HANDBRAKE_GRIP = 0.9;
+const CAR_RADIUS = 1.35;
+const STEAL_RANGE = 3.6;
+const TRAFFIC_CRUISE = 11;
+const TRAFFIC_BRAKE_AHEAD = 9;
+const TRAFFIC_SWERVE_AHEAD = 14;
+const TRAFFIC_DESPAWN = 130;
+
+// Sport boost: Shift in a sport body. Instant surge, no wind-up.
+const BOOST_TOP_MULT = 1.35;
+const BOOST_ACCEL_MULT = 1.6;
+const BOOST_DURATION = 1.5;
+const BOOST_RECHARGE_RATE = 0.25;
 
 const BODY_TYPES = ['sedan', 'hatchback', 'van', 'sport'];
-// Every car type the factory accepts, including the two extra sport cars.
 const ALL_CAR_TYPES = ['sedan', 'hatchback', 'van', 'sport', 'roadster', 'supercar'];
-// The three sport cars, quick and rare: traffic and parking pick one of
-// these only sometimes, so spotting one still feels special.
 const SPORT_TYPES = ['sport', 'roadster', 'supercar'];
-const SPORT_TRAFFIC_CHANCE = 0.12; // sport cars in traffic: roughly 1 in 8
-const SPORT_PARKED_CHANCE = 0.15; // sport cars among parked cars
+const SPORT_TRAFFIC_CHANCE = 0.12;
+const SPORT_PARKED_CHANCE = 0.15;
 
-// Motorbike tuning: bikes flow faster than cars and sway across the lane
-// as they filter through traffic.
-const BIKE_CRUISE = 16; // m/s, about 58 km/h — quicker than car traffic
+const BIKE_CRUISE = 16;
 const BIKE_TOP_SPEED = 21;
 const BIKE_ACCEL = 12;
-const BIKE_WEAVE = 1.6; // metres of lane-splitting sway, each side
-const BIKE_WEAVE_RATE = 1.1; // sway oscillations per second, roughly
+const BIKE_WEAVE = 1.6;
+const BIKE_WEAVE_RATE = 1.1;
 const BIKE_COUNT = 5;
+
 const PAINT_COLORS = [
-  0xe23b3b, // sunset red
-  0x2f7fd0, // ocean blue
-  0xf2b234, // taxi yellow
-  0x37b268, // palm green
-  0xf2f0e6, // sand white
-  0x8a5fbf, // dusk purple
-  0x22262e, // midnight black
-  0xe87aa0, // coral pink
+  0xe23b3b, 0x2f7fd0, 0xf2b234, 0x37b268,
+  0xf2f0e6, 0x8a5fbf, 0x22262e, 0xe87aa0,
+];
+// Loud palette reserved for the sport bodies, so they read as special.
+const SPORT_PAINT_COLORS = [
+  0x39d353, // lime
+  0xff7a1a, // tangerine
+  0x00c8c8, // lagoon cyan
+  0xff2e88, // hot pink
+  0xffe600, // electric yellow
 ];
 const WINDOW_COLOR = 0x18222e;
 const TYRE_COLOR = 0x14161a;
 const HUB_COLOR = 0xb9c0c9;
 
+// One scratch vector for the whole module: the hot loop never allocates.
+const _fwd = { x: 0, z: 0 };
+
+// Body dimensions per style: [length, width, bodyHeight, cabinLength].
+const BODY_DIMS = {
+  sedan: [4.4, 1.9, 0.62, 2.1],
+  hatchback: [3.6, 1.8, 0.68, 2.0],
+  van: [4.8, 2.0, 1.05, 3.4],
+  sport: [4.3, 1.95, 0.5, 1.7],
+  roadster: [4.2, 1.9, 0.5, 1.4],
+  supercar: [4.4, 2.0, 0.44, 1.5],
+};
+
 // ---------------------------------------------------------------------------
-// Car factory — one procedural body per type, all from boxes and cylinders.
-// A car is a group whose forward direction is -Z, matching the player.
+// Car factory — six body styles from boxes, cylinders and paint.
 // ---------------------------------------------------------------------------
+
 function buildCarBody(type, colour) {
   const body = new THREE.Group();
-  body.name = `Car_${type}`;
+  body.name = 'Car_' + type;
   const paint = new THREE.MeshStandardMaterial({ color: colour, roughness: 0.35, metalness: 0.35 });
   const glass = new THREE.MeshStandardMaterial({ color: WINDOW_COLOR, roughness: 0.15, metalness: 0.6 });
   const tyre = new THREE.MeshStandardMaterial({ color: TYRE_COLOR, roughness: 0.95 });
   const hub = new THREE.MeshStandardMaterial({ color: HUB_COLOR, roughness: 0.3, metalness: 0.7 });
+  const lightFront = new THREE.MeshStandardMaterial({ color: 0xfff2c0, emissive: 0xffe9a0, emissiveIntensity: 0.7 });
+  const lightRear = new THREE.MeshStandardMaterial({ color: 0xd21f2b, emissive: 0x8f1018, emissiveIntensity: 0.7 });
 
-  const addBox = (material, w, h, d, x, y, z, parent = body) => {
+  const putBox = (material, x, y, z, w, h, d, parent) => {
     const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), material);
     mesh.position.set(x, y, z);
     mesh.castShadow = true;
-    parent.add(mesh);
+    (parent || body).add(mesh);
     return mesh;
   };
 
-  // Dimensions per body style: [length, width, bodyHeight, cabinLength].
-  const dims = {
-    sedan: [4.4, 1.9, 0.62, 2.1],
-    hatchback: [3.6, 1.8, 0.68, 2.0],
-    van: [4.8, 2.0, 1.05, 3.4],
-    sport: [4.3, 1.95, 0.5, 1.7],
-    roadster: [4.2, 1.9, 0.5, 1.4],
-    supercar: [4.4, 2.0, 0.44, 1.5],
-  }[type];
-  const [length, width, bodyHeight, cabinLength] = dims;
+  const dims = BODY_DIMS[type];
+  const length = dims[0];
+  const width = dims[1];
+  const bodyHeight = dims[2];
+  const cabinLength = dims[3];
+  const isVan = type === 'van';
+  const cabinY = 0.55 + bodyHeight / 2 + (isVan ? 0.55 : 0.34);
+  const cabinH = isVan ? 1.1 : 0.62;
+  const cabinZ = isVan ? 0.1 : 0.15;
 
-  // Lower body slab, cabin, and a sloped hood/trunk suggestion.
-  addBox(paint, width, bodyHeight, length, 0, 0.55, 0);
-  const cabinY = 0.55 + bodyHeight / 2 + (type === 'van' ? 0.55 : 0.34);
-  const cabinH = type === 'van' ? 1.1 : 0.62;
-  const cabin = addBox(glass, width - 0.24, cabinH, cabinLength, 0, cabinY, type === 'van' ? 0.1 : 0.15);
-  // Paint roof strip over the glass cabin so it reads as a car, not a box.
-  // The roadster keeps its top open: no roof strip, just a low windshield.
+  // Slab, glass cabin, and a roof strip — except the roadster, which
+  // keeps its cockpit open under a low raked windshield.
+  putBox(paint, 0, 0.55, 0, width, bodyHeight, length);
+  putBox(glass, 0, cabinY, cabinZ, width - 0.24, cabinH, cabinLength);
   if (type !== 'roadster') {
-    addBox(paint, width - 0.18, 0.08, cabinLength - 0.3, 0, cabinY + cabinH / 2, type === 'van' ? 0.1 : 0.15);
+    putBox(paint, 0, cabinY + cabinH / 2, cabinZ, width - 0.18, 0.08, cabinLength - 0.3);
   }
   if (type === 'sport') {
-    // Low rear spoiler.
-    addBox(paint, width - 0.3, 0.07, 0.3, 0, 1.05, length / 2 - 0.15);
+    putBox(paint, 0, 1.05, length / 2 - 0.15, width - 0.3, 0.07, 0.3);
   }
   if (type === 'roadster') {
-    // Low windshield raked back over the open cockpit, plus a long hood
-    // line: the roadster reads as a two-seater even from a distance.
-    addBox(glass, width - 0.5, 0.3, 0.06, 0, cabinY + 0.22, -0.55);
-    addBox(paint, width - 0.24, 0.06, 0.9, 0, 0.86, -length / 2 + 0.5);
+    putBox(glass, 0, cabinY + 0.22, -0.55, width - 0.5, 0.3, 0.06);
+    putBox(paint, 0, 0.86, -length / 2 + 0.5, width - 0.24, 0.06, 0.9);
   }
   if (type === 'supercar') {
-    // Big rear wing on twin struts, a front splitter lip, and a black
-    // roof panel so the car reads lower and meaner than the sport coupe.
-    addBox(paint, width - 0.3, 0.06, 0.34, 0, 1.02, length / 2 - 0.12);
-    addBox(paint, 0.08, 0.22, 0.06, -width / 2 + 0.35, 0.86, length / 2 - 0.12);
-    addBox(paint, 0.08, 0.22, 0.06, width / 2 - 0.35, 0.86, length / 2 - 0.12);
-    addBox(paint, width - 0.2, 0.08, 0.3, 0, 0.32, -length / 2 + 0.05);
-    addBox(tyre, width - 0.3, 0.05, cabinLength - 0.5, 0, cabinY + cabinH / 2 + 0.02, 0.15);
+    // Big rear wing on twin struts, front splitter, black roof panel.
+    putBox(paint, 0, 1.02, length / 2 - 0.12, width - 0.3, 0.06, 0.34);
+    putBox(paint, -width / 2 + 0.35, 0.86, length / 2 - 0.12, 0.08, 0.22, 0.06);
+    putBox(paint, width / 2 - 0.35, 0.86, length / 2 - 0.12, 0.08, 0.22, 0.06);
+    putBox(paint, 0, 0.32, -length / 2 + 0.05, width - 0.2, 0.08, 0.3);
+    putBox(tyre, 0, cabinY + cabinH / 2 + 0.02, 0.15, width - 0.3, 0.05, cabinLength - 0.5);
   }
-  if (type === 'van') {
-    // Side panel line and a roof rack hint.
-    addBox(paint, 0.06, 0.5, 2.4, width / 2, 1.15, 0.2);
-    addBox(paint, 0.06, 0.5, 2.4, -width / 2, 1.15, 0.2);
+  if (isVan) {
+    putBox(paint, width / 2, 1.15, 0.2, 0.06, 0.5, 2.4);
+    putBox(paint, -width / 2, 1.15, 0.2, 0.06, 0.5, 2.4);
   }
 
-  // Headlights (front = -Z) and taillights (rear = +Z).
-  const lightFront = new THREE.MeshStandardMaterial({ color: 0xfff2c0, emissive: 0xffe9a0, emissiveIntensity: 0.7 });
-  const lightRear = new THREE.MeshStandardMaterial({ color: 0xd21f2b, emissive: 0x8f1018, emissiveIntensity: 0.7 });
-  addBox(lightFront, 0.34, 0.12, 0.06, -width / 2 + 0.35, 0.62, -length / 2 - 0.01);
-  addBox(lightFront, 0.34, 0.12, 0.06, width / 2 - 0.35, 0.62, -length / 2 - 0.01);
-  addBox(lightRear, 0.34, 0.12, 0.06, -width / 2 + 0.35, 0.62, length / 2 + 0.01);
-  addBox(lightRear, 0.34, 0.12, 0.06, width / 2 - 0.35, 0.62, length / 2 + 0.01);
+  // Headlights at -Z, taillights at +Z. The rear material is kept so
+  // braking can flare it.
+  putBox(lightFront, -width / 2 + 0.35, 0.62, -length / 2 - 0.01, 0.34, 0.12, 0.06);
+  putBox(lightFront, width / 2 - 0.35, 0.62, -length / 2 - 0.01, 0.34, 0.12, 0.06);
+  putBox(lightRear, -width / 2 + 0.35, 0.62, length / 2 + 0.01, 0.34, 0.12, 0.06);
+  putBox(lightRear, width / 2 - 0.35, 0.62, length / 2 + 0.01, 0.34, 0.12, 0.06);
 
-  // Four wheels: dark cylinders turned sideways, with a hub cap disc.
+  // Four wheels with hub caps.
   const wheelGeo = new THREE.CylinderGeometry(0.36, 0.36, 0.26, 18);
   const hubGeo = new THREE.CylinderGeometry(0.18, 0.18, 0.28, 12);
-  const wheelPositions = [
+  const wheelSpots = [
     [-width / 2, -length / 2 + 0.85],
     [width / 2, -length / 2 + 0.85],
     [-width / 2, length / 2 - 0.85],
     [width / 2, length / 2 - 0.85],
   ];
-  for (const [wx, wz] of wheelPositions) {
+  for (const spot of wheelSpots) {
     const wheel = new THREE.Mesh(wheelGeo, tyre);
     wheel.rotation.z = Math.PI / 2;
-    wheel.position.set(wx, 0.36, wz);
+    wheel.position.set(spot[0], 0.36, spot[1]);
     wheel.castShadow = true;
     body.add(wheel);
     const cap = new THREE.Mesh(hubGeo, hub);
     cap.rotation.z = Math.PI / 2;
-    cap.position.set(wx, 0.36, wz);
+    cap.position.set(spot[0], 0.36, spot[1]);
     body.add(cap);
   }
 
-  return { group: body, length, width };
+  return { group: body, length, width, rearLightMat: lightRear };
 }
 
 export function createCar(scene, type = 'sedan', colour = 0xe23b3b, x = 0, z = 0, heading = 0) {
@@ -242,12 +228,14 @@ export function createCar(scene, type = 'sedan', colour = 0xe23b3b, x = 0, z = 0
     isPlayer: false,
     isTraffic: false,
     stolen: false,
-    driver: null, // traffic driver record; null for parked / player cars
-    takenByPlayer: false, // set once the player first takes this car
+    driver: null,
+    takenByPlayer: false,
     length: built.length,
     width: built.width,
     engineDead: false,
-    // Traffic-AI state, ignored for the player car.
+    boostMeter: 1,
+    boosting: false,
+    rearLightMat: built.rearLightMat,
     laneIndex: 0,
     waypointIndex: 0,
     cruiseSpeed: TRAFFIC_CRUISE,
@@ -274,12 +262,10 @@ export function createCar(scene, type = 'sedan', colour = 0xe23b3b, x = 0, z = 0
 }
 
 // ---------------------------------------------------------------------------
-// Motorbikes — NPC traffic only. A bike is a slim two-wheeler with a rider
-// who leans into corners. Bikes are never enterable: they exist to make the
-// traffic feel alive and to give Leo something quick to dodge. The bike's
-// forward is -Z like the cars, and it leans by rolling its inner group
-// around the long (Z) axis — positive roll leans left when facing north.
+// Motorbikes — NPC traffic only. Slim two-wheeler, rider leaning forward,
+// banking into corners via an inner lean group rolling around Z.
 // ---------------------------------------------------------------------------
+
 function buildBikeBody(colour, riderColour, helmetColour) {
   const group = new THREE.Group();
   group.name = 'Motorbike';
@@ -292,15 +278,14 @@ function buildBikeBody(colour, riderColour, helmetColour) {
   const helmetMat = new THREE.MeshStandardMaterial({ color: helmetColour, roughness: 0.3, metalness: 0.2 });
   const skin = new THREE.MeshStandardMaterial({ color: 0xc98d64, roughness: 0.7 });
 
-  const addBox = (material, w, h, d, x, y, z, parent = leanGroup) => {
+  const putBox = (material, x, y, z, w, h, d, parent) => {
     const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), material);
     mesh.position.set(x, y, z);
     mesh.castShadow = true;
-    parent.add(mesh);
+    (parent || leanGroup).add(mesh);
     return mesh;
   };
 
-  // Two wheels: dark cylinders turned sideways, front at -Z.
   const wheelGeo = new THREE.CylinderGeometry(0.34, 0.34, 0.12, 16);
   for (const wz of [-0.55, 0.55]) {
     const wheel = new THREE.Mesh(wheelGeo, dark);
@@ -313,19 +298,18 @@ function buildBikeBody(colour, riderColour, helmetColour) {
     hub.position.set(0, 0.34, wz);
     leanGroup.add(hub);
   }
-  // Frame spine, fuel tank, seat and handlebar.
-  addBox(dark, 0.09, 0.09, 1.35, 0, 0.62, 0);
-  addBox(paint, 0.34, 0.22, 0.5, 0, 0.78, -0.08);
-  addBox(dark, 0.3, 0.1, 0.45, 0, 0.8, 0.38);
-  addBox(chrome, 0.56, 0.06, 0.06, 0, 0.95, -0.55);
-  // Headlight up front, taillight at the back.
-  const headMat = new THREE.MeshStandardMaterial({ color: 0xfff2c0, emissive: 0xffe9a0, emissiveIntensity: 0.7 });
-  addBox(headMat, 0.16, 0.12, 0.05, 0, 0.72, -0.62);
+  // Spine, tank, seat, handlebar, bright headlight, taillight.
+  putBox(dark, 0, 0.62, 0, 0.09, 0.09, 1.35);
+  putBox(paint, 0, 0.78, -0.08, 0.34, 0.22, 0.5);
+  putBox(dark, 0, 0.8, 0.38, 0.3, 0.1, 0.45);
+  putBox(chrome, 0, 0.95, -0.55, 0.56, 0.06, 0.06);
+  const headMat = new THREE.MeshStandardMaterial({ color: 0xfff2c0, emissive: 0xffe9a0, emissiveIntensity: 1.2 });
+  putBox(headMat, 0, 0.72, -0.62, 0.16, 0.12, 0.05);
   const tailMat = new THREE.MeshStandardMaterial({ color: 0xd21f2b, emissive: 0x8f1018, emissiveIntensity: 0.7 });
-  addBox(tailMat, 0.16, 0.1, 0.05, 0, 0.78, 0.62);
+  putBox(tailMat, 0, 0.78, 0.62, 0.16, 0.1, 0.05);
 
-  // The rider: leaning forward over the tank, helmet on, hands on the bar.
-  const torso = addBox(riderMat, 0.42, 0.55, 0.26, 0, 1.15, 0.08);
+  // Rider: torso leaning over the tank, helmet, arms to the bar, legs tucked.
+  const torso = putBox(riderMat, 0, 1.15, 0.08, 0.42, 0.55, 0.26);
   torso.rotation.x = 0.5;
   const head = new THREE.Mesh(new THREE.SphereGeometry(0.16, 12, 10), skin);
   head.position.set(0, 1.5, -0.14);
@@ -336,9 +320,9 @@ function buildBikeBody(colour, riderColour, helmetColour) {
   helmet.castShadow = true;
   leanGroup.add(helmet);
   for (const side of [-1, 1]) {
-    const arm = addBox(riderMat, 0.11, 0.5, 0.12, side * 0.24, 1.28, -0.3);
+    const arm = putBox(riderMat, side * 0.24, 1.28, -0.3, 0.11, 0.5, 0.12);
     arm.rotation.x = -0.9;
-    const leg = addBox(dark, 0.14, 0.5, 0.14, side * 0.2, 0.72, 0.18);
+    const leg = putBox(dark, side * 0.2, 0.72, 0.18, 0.14, 0.5, 0.14);
     leg.rotation.x = 0.35;
   }
 
@@ -382,8 +366,9 @@ export function createMotorbike(scene, x = 0, z = 0, heading = 0, colour = 0xd21
 }
 
 // ---------------------------------------------------------------------------
-// Small helpers
+// Small helpers — allocation-free in the hot path.
 // ---------------------------------------------------------------------------
+
 function angleDifference(from, to) {
   let diff = to - from;
   while (diff > Math.PI) diff -= Math.PI * 2;
@@ -391,12 +376,15 @@ function angleDifference(from, to) {
   return diff;
 }
 
-function forwardOf(heading) {
-  return { x: -Math.sin(heading), z: -Math.cos(heading) };
+// Forward vector of a heading (forward is -Z at heading 0), written into
+// the shared scratch object. Read x/z at once; never hold the reference.
+function forwardInto(heading, out) {
+  out.x = -Math.sin(heading);
+  out.z = -Math.cos(heading);
+  return out;
 }
 
-// Default street grid used only when the city module has not supplied lanes
-// yet: a 5x5 grid of two-way streets 40 metres apart.
+// Fallback 5x5 two-way street grid, used only when the city gives no lanes.
 function defaultLanes() {
   const lanes = [];
   const step = 40;
@@ -436,13 +424,19 @@ export function createVehicleSystem(scene, city = {}, options = {}) {
   let playerCar = null;
   let spawnCursor = 0;
 
-  // Pick a car type for a fresh spawn: sport cars are rare by design, so
-  // most of the time a plain body style comes out of the cycle instead.
+  // Sport cars are rare by design: most spawns are plain body styles.
   function pickSpawnType(cycleIndex, sportChance) {
     if (Math.random() < sportChance) {
       return SPORT_TYPES[Math.floor(Math.random() * SPORT_TYPES.length)];
     }
     return BODY_TYPES[cycleIndex % BODY_TYPES.length];
+  }
+
+  function pickColour(type, index) {
+    if (SPORT_TYPES.includes(type)) {
+      return SPORT_PAINT_COLORS[index % SPORT_PAINT_COLORS.length];
+    }
+    return PAINT_COLORS[index % PAINT_COLORS.length];
   }
 
   // --- collisions ----------------------------------------------------------
@@ -470,20 +464,33 @@ export function createVehicleSystem(scene, city = {}, options = {}) {
   }
 
   // --- the shared arcade driving model ------------------------------------
-  // Every car in the game — player or traffic — moves through this one
-  // function. Steering only bites while the car is moving; the handbrake
-  // cuts grip so the tail slides; hitting a building scrubs speed hard.
-  function driveStep(car, dt, throttle, steerInput, braking, handbrake) {
+  // One function drives every car, player or traffic. Steering tracks the
+  // keys almost at once (STEER_RESPONSE 10) but the lock tightens with
+  // speed, so fast cars stay forgiving instead of twitchy. Throttle,
+  // brake and boost all bite the same frame the key is pressed.
+  function driveStep(car, dt, throttle, steerInput, braking, handbrake, boostKey) {
     if (car.engineDead || car.destroyed) {
       car.speed *= Math.max(0, 1 - dt * 2);
       return;
     }
-    const topSpeed = TOP_SPEED[car.type];
-    const accel = ACCEL[car.type];
+    const isSport = SPORT_TYPES.includes(car.type);
+    let topSpeed = TOP_SPEED[car.type];
+    let accel = ACCEL[car.type];
+    // Boost: Shift in a sport car. Instant surge while the meter lasts;
+    // it refills once you lift off.
+    if (boostKey && isSport && car.boostMeter > 0) {
+      topSpeed *= BOOST_TOP_MULT;
+      accel *= BOOST_ACCEL_MULT;
+      car.boostMeter = Math.max(0, car.boostMeter - dt / BOOST_DURATION);
+      car.boosting = true;
+    } else {
+      car.boosting = false;
+      car.boostMeter = Math.min(1, car.boostMeter + dt * BOOST_RECHARGE_RATE);
+    }
 
     if (throttle > 0) car.speed += accel * throttle * dt;
     else if (throttle < 0) {
-      // S or Down: brake while moving forward, reverse once stopped.
+      // S: brake while moving forward, reverse once stopped.
       if (car.speed > 0.5) car.speed -= BRAKE_FORCE * dt;
       else car.speed -= accel * 0.6 * dt;
     }
@@ -494,25 +501,32 @@ export function createVehicleSystem(scene, city = {}, options = {}) {
     car.speed -= car.speed * 0.35 * dt;
     car.speed = Math.max(-REVERSE_TOP_SPEED, Math.min(topSpeed, car.speed));
 
-    // Steering: less lock at high speed so the car stays controllable.
+    // Steering: less lock at high speed, fast wheel response; the
+    // handbrake loosens it on purpose so the tail slides.
     const speedFactor = Math.min(1, Math.abs(car.speed) / 12);
     const targetSteer = steerInput * STEER_RATE * (0.45 + 0.55 * (1 - speedFactor * 0.6));
-    const grip = handbrake ? HANDBRAKE_GRIP : GRIP;
-    car.steer += (targetSteer - car.steer) * Math.min(1, dt * grip * 3);
+    const steerResponse = STEER_RESPONSE * (handbrake ? HANDBRAKE_GRIP / GRIP : 1);
+    car.steer += (targetSteer - car.steer) * Math.min(1, dt * steerResponse);
     const direction = car.speed >= 0 ? 1 : -1;
     car.heading += car.steer * dt * direction * Math.min(1, Math.abs(car.speed) / 4 + 0.25);
 
-    const fwd = forwardOf(car.heading);
+    // Brake lights flare while braking or reversing — just a number on
+    // an existing material, no allocation.
+    if (car.rearLightMat) {
+      car.rearLightMat.emissiveIntensity = (braking || throttle < 0) ? 2.2 : 0.7;
+    }
+
+    const fwd = forwardInto(car.heading, _fwd);
     const nextX = car.group.position.x + fwd.x * car.speed * dt;
     const nextZ = car.group.position.z + fwd.z * car.speed * dt;
 
-    // Buildings: stop dead-ish and take a little damage on a hard hit.
+    // Buildings: stop short and take a little damage on a hard hit.
     if (collidesWithBuildings(nextX, nextZ, CAR_RADIUS)) {
       if (Math.abs(car.speed) > 8) car.damage(Math.abs(car.speed) * 0.6);
       car.speed *= -0.25;
       return;
     }
-    // Other cars: soft push — both cars lose speed instead of passing through.
+    // Other cars: soft push — both lose speed instead of passing through.
     const other = collidesWithCar(car, nextX, nextZ);
     if (other) {
       const impact = Math.abs(car.speed - other.speed);
@@ -536,9 +550,8 @@ export function createVehicleSystem(scene, city = {}, options = {}) {
 
   // --- traffic AI -----------------------------------------------------------
   // A traffic car chases the next point on its lane. If the car ahead (or
-  // the player's car, or the player on foot) is too close it brakes; if the
-  // blockage sits in its lane it nudges sideways to slip past. It only ever
-  // steers between lane waypoints, so it cannot leave the road.
+  // the player's car, or the player on foot) is too close it brakes; if
+  // the blockage sits in its lane it nudges sideways to slip past.
   function updateTrafficCar(car, dt, playerPos) {
     const lane = lanes[car.laneIndex % lanes.length];
     const points = lane.points;
@@ -549,7 +562,6 @@ export function createVehicleSystem(scene, city = {}, options = {}) {
     if (distToTarget < 6) {
       car.waypointIndex += 1;
       if (car.waypointIndex >= points.length) {
-        // Loop the lane: pick a fresh lane nearby so traffic keeps flowing.
         car.laneIndex = (car.laneIndex + 1) % lanes.length;
         car.waypointIndex = 0;
       }
@@ -560,8 +572,8 @@ export function createVehicleSystem(scene, city = {}, options = {}) {
     const headingError = angleDifference(car.heading, desiredHeading);
     const steerInput = THREE.MathUtils.clamp(headingError * 1.6, -1, 1);
 
-    // Look ahead along the car's nose for anything in the way.
-    const fwd = forwardOf(car.heading);
+    // Look ahead along the nose for anything in the way.
+    const fwd = forwardInto(car.heading, _fwd);
     let blocked = false;
     let brake = false;
     for (const other of cars) {
@@ -594,7 +606,7 @@ export function createVehicleSystem(scene, city = {}, options = {}) {
     // Traffic never reverses; ease toward its cruise speed.
     const cruise = Math.min(car.cruiseSpeed, TOP_SPEED[car.type] * 0.5);
     if (car.speed > cruise) car.speed -= 6 * dt;
-    driveStep(car, dt, throttle, steer, brake, false);
+    driveStep(car, dt, throttle, steer, brake, false, false);
   }
 
   // --- traffic bikes ---------------------------------------------------------
@@ -630,7 +642,7 @@ export function createVehicleSystem(scene, city = {}, options = {}) {
     const steerInput = THREE.MathUtils.clamp(headingError * 1.6, -1, 1);
 
     // Look ahead for a car (or the player on foot) to brake for.
-    const fwd = forwardOf(bike.heading);
+    const fwd = forwardInto(bike.heading, _fwd);
     let brake = false;
     for (const other of cars) {
       if (other.destroyed) continue;
@@ -663,7 +675,7 @@ export function createVehicleSystem(scene, city = {}, options = {}) {
     bike.heading += THREE.MathUtils.clamp(headingError, -turnRate * dt, turnRate * dt);
 
     // Move along the NEW heading, not the one the brake check just read.
-    const moveFwd = forwardOf(bike.heading);
+    const moveFwd = forwardInto(bike.heading, _fwd);
     const nx = bike.group.position.x + moveFwd.x * bike.speed * dt;
     const nz = bike.group.position.z + moveFwd.z * bike.speed * dt;
     if (nx < bounds.minX || nx > bounds.maxX || nz < bounds.minZ || nz > bounds.maxZ) {
@@ -674,8 +686,8 @@ export function createVehicleSystem(scene, city = {}, options = {}) {
     bike.group.position.z = nz;
     bike.group.rotation.y = bike.heading;
 
-    // Lean into the turn: steering left rolls the bike left, and the other
-    // way for a right-hander. Smoothed so it banks instead of snapping.
+    // Lean into the turn: steering left rolls the bike left. Smoothed so
+    // it banks instead of snapping.
     const leanTarget = THREE.MathUtils.clamp(steerInput * 0.42, -0.45, 0.45);
     bike.lean += (leanTarget - bike.lean) * Math.min(1, dt * 6);
     bike.leanGroup.rotation.z = bike.lean;
@@ -700,7 +712,7 @@ export function createVehicleSystem(scene, city = {}, options = {}) {
         const spot = carSpawns[spawnCursor % carSpawns.length];
         spawnCursor += 1;
         const type = pickSpawnType(spawnCursor + i, SPORT_PARKED_CHANCE);
-        const colour = PAINT_COLORS[(spawnCursor * 3 + i) % PAINT_COLORS.length];
+        const colour = pickColour(type, spawnCursor * 3 + i);
         const car = createCar(scene, type, colour, spot.x, spot.z, spot.heading);
         cars.push(car);
         made.push(car);
@@ -768,7 +780,7 @@ export function createVehicleSystem(scene, city = {}, options = {}) {
         };
         const pointIndex = segIndex;
         const type = pickSpawnType(i * 2 + 1, SPORT_TRAFFIC_CHANCE);
-        const colour = PAINT_COLORS[(i * 5 + 2) % PAINT_COLORS.length];
+        const colour = pickColour(type, i * 5 + 2);
         // Face along the lane from the point the car actually spawns on,
         // toward the next waypoint it will drive to.
         const nextPoint = lane.points[(pointIndex + 1) % lane.points.length];
@@ -837,9 +849,7 @@ export function createVehicleSystem(scene, city = {}, options = {}) {
       return player.exitVehicle();
     },
 
-    // F key: take the nearest car in reach, parked or in traffic. Stealing
-    // a traffic car counts as a crime (the police module listens through
-    // onCarStolen); taking a parked car is the same action here.
+    // F key: take the nearest car in reach, parked or in traffic.
     trySteal(playerPos) {
       if (!player || player.inVehicle) return null;
       const car = this.nearestEnterableVehicle(playerPos, STEAL_RANGE);
@@ -857,8 +867,7 @@ export function createVehicleSystem(scene, city = {}, options = {}) {
       return playerCar !== null;
     },
 
-    // Police module hooks: damage the player's car, or kill its engine so a
-    // chase can end with the player busted on foot.
+    // Police module hooks: damage the player's car, or kill its engine.
     damagePlayerCar(amount) {
       if (playerCar) playerCar.damage(amount);
     },
@@ -874,7 +883,8 @@ export function createVehicleSystem(scene, city = {}, options = {}) {
       if (playerCar && player && player.inVehicle) {
         const steerInput = (input.left ? -1 : 0) + (input.right ? 1 : 0);
         const throttle = (input.forward ? 1 : 0) + (input.back ? -1 : 0);
-        driveStep(playerCar, dt, throttle, steerInput, !!input.brake, !!input.handbrake);
+        // Shift is the sport-car boost while driving (on foot it is run).
+        driveStep(playerCar, dt, throttle, steerInput, !!input.brake, !!input.handbrake, !!input.run);
         // Keep the hidden player glued to the driver's seat.
         player.group.position.copy(playerCar.group.position);
         player.group.rotation.y = playerCar.heading;

@@ -1,11 +1,19 @@
 // shots.js — Solmar Bay deterministic screenshot staging.
 //
-// When the page is loaded with ?shot=<name>&seed=<n>, this module poses a
-// fixed scene for that shot and nothing else: it never changes the real game
-// balance, never edits a mission definition, never touches the save file.
-// main.js calls applyShotStaging() once after the world is built, runs a few
-// frames so the renderer settles, then sets window.__shotReady = true so a
+// Loading the page with ?shot=<name>&seed=<n> poses one fixed scene and
+// nothing else: it never changes the real game balance, never edits a
+// mission definition, never touches the save file. main.js calls
+// applyShotStaging() once after the world is built, renders a few frames
+// so the renderer settles, then sets window.__shotReady = true so a
 // headless capture script knows the frame is ready.
+//
+// An optional &cam=<mode> picks a camera variant for the shot:
+//   drive: cam=side   — a side profile of Leo's supercar with the road
+//                       ahead and the oncoming bike in frame.
+//   chase: cam=wide   — the reverse chase angle pulled back and up, so
+//                       the whole patrol pack reads in one frame.
+// Without &cam the default camera is used (normal driving camera for
+// drive, reverse angle for chase).
 //
 // The four shots, each showing several systems at once:
 //   cover   — Leo on foot at golden hour: HUD, minimap, mission objective,
@@ -14,7 +22,7 @@
 //             down the avenue.
 //   drive   — Leo driving a red supercar through traffic: speed, minimap,
 //             1 wanted star, a motorbike in the oncoming lane.
-//   chase   — a police chase: 2–3 patrol cars and a police motorbike
+//   chase   — a police chase: 2-3 patrol cars and a police motorbike
 //             behind Leo's yellow sport coupe, 3 wanted stars, police
 //             blips on the minimap, mission objective on the HUD.
 //   mission — a mission in progress: Leo on foot with his pistol near the
@@ -23,7 +31,7 @@
 //
 // `game` is the live context main.js hands over:
 //   { player, vehicles, pedestrians, police, combat, missions, world,
-//     setCash(amount), startMissionSafe(id), placeCarNear(x, z, heading) }
+//     setCash(amount), startMissionSafe(id), cameraMode }
 // Positions are fixed constants, jittered only by the seeded RNG, so the
 // same seed always stages the same frame.
 
@@ -31,7 +39,13 @@ import { createRng, seedFromString } from './utils.js';
 
 export const SHOT_NAMES = ['cover', 'drive', 'chase', 'mission'];
 
-// Read ?shot= and ?seed= from the page URL. Unknown names return null.
+// Camera variants each shot understands. Anything else falls back to the
+// shot's default camera.
+const CAM_VARIANTS = {
+  drive: ['side'],
+  chase: ['wide'],
+};
+
 export function readShotParams() {
   try {
     const params = new URLSearchParams(window.location.search);
@@ -39,47 +53,47 @@ export function readShotParams() {
     if (!SHOT_NAMES.includes(name)) return null;
     const seedRaw = parseInt(params.get('seed') || '1', 10);
     const seed = Number.isFinite(seedRaw) ? seedRaw : 1;
-    return { name, seed };
+    const camRaw = (params.get('cam') || '').toLowerCase();
+    const cam = (CAM_VARIANTS[name] || []).includes(camRaw) ? camRaw : null;
+    return { name, seed, cam };
   } catch {
     return null;
   }
 }
 
+// Move one entity (car, bike, walker, police unit) to a fixed spot.
+function poseEntity(entity, x, z, heading, speed) {
+  if (!entity) return null;
+  entity.group.position.set(x, 0, z);
+  entity.heading = heading;
+  entity.group.rotation.y = heading;
+  if (typeof speed === 'number') entity.speed = speed;
+  return entity;
+}
+
+// Place the first few traffic cars on the given spots.
 function placeTrafficNear(game, spots) {
   const traffic = game.vehicles.traffic || [];
-  for (let i = 0; i < spots.length && i < traffic.length; i += 1) {
-    const car = traffic[i];
-    const spot = spots[i];
-    car.group.position.set(spot.x, 0, spot.z);
-    car.heading = spot.heading;
-    car.group.rotation.y = spot.heading;
-    car.speed = spot.speed || 0;
-  }
+  spots.slice(0, traffic.length).forEach((spot, i) => {
+    poseEntity(traffic[i], spot.x, spot.z, spot.heading, spot.speed || 0);
+  });
 }
 
 function placePedestriansNear(game, spots) {
   const walkers = game.pedestrians.pedestrians || [];
-  for (let i = 0; i < spots.length && i < walkers.length; i += 1) {
+  spots.slice(0, walkers.length).forEach((spot, i) => {
     const ped = walkers[i];
-    const spot = spots[i];
-    ped.group.position.set(spot.x, 0, spot.z);
-    ped.heading = spot.heading;
-    ped.group.rotation.y = spot.heading;
+    poseEntity(ped, spot.x, spot.z, spot.heading, 0);
     ped.state = 'walking';
     ped.panic = 0;
-  }
+  });
 }
 
 // Put one parked car where the camera can see it, ready to be stolen.
 function placeStealableCar(game, x, z, heading) {
   const parked = (game.vehicles.cars || []).filter((c) => !c.isTraffic && !c.isPlayer);
   const car = parked[0] || (game.vehicles.cars || [])[0];
-  if (!car) return null;
-  car.group.position.set(x, 0, z);
-  car.heading = heading;
-  car.group.rotation.y = heading;
-  car.speed = 0;
-  return car;
+  return poseEntity(car, x, z, heading, 0);
 }
 
 function startMissionIfFree(game, id) {
@@ -106,8 +120,7 @@ function stageCover(game, rng) {
   // down the avenue toward the camera, so the cover shows the new rides.
   try {
     game.vehicles.spawnCarAt('roadster', 0x2f7fd0, -12.5, -6, Math.PI / 2);
-    const bike = game.vehicles.spawnBikeAt(3.5, -26, Math.PI);
-    if (bike) bike.speed = 12;
+    poseEntity(game.vehicles.spawnBikeAt(3.5, -26, Math.PI), 3.5, -26, Math.PI, 12);
   } catch {
     // Staging extras are optional; the shot still works without them.
   }
@@ -127,7 +140,7 @@ function stageCover(game, rng) {
   void rng;
 }
 
-function stageDrive(game, rng) {
+function stageDrive(game, rng, cam) {
   // Leo driving north up the central avenue at a brisk cruise, traffic
   // ahead and behind, one star on the board from a fender-bender earlier.
   // Order matters: taking the car is itself a crime, so the wanted level
@@ -143,8 +156,7 @@ function stageDrive(game, rng) {
   startMissionIfFree(game, 'first-fare');
   // A motorbike in the oncoming lane, closing on Leo as he drives north.
   try {
-    const bike = game.vehicles.spawnBikeAt(3.5, 16, Math.PI);
-    if (bike) bike.speed = 14;
+    poseEntity(game.vehicles.spawnBikeAt(3.5, 16, Math.PI), 3.5, 16, Math.PI, 14);
   } catch {
     // Staging extras are optional; the shot still works without them.
   }
@@ -159,10 +171,13 @@ function stageDrive(game, rng) {
     { x: 9.5, z: 20, heading: 1.1 },
     { x: -9.5, z: 60, heading: -2.0 },
   ]);
+  // Camera variant: a side profile that shows the supercar's shape and
+  // the road ahead in one frame. Default is the normal driving camera.
+  game.cameraMode = cam === 'side' ? 'drive-side' : null;
   void rng;
 }
 
-function stageChase(game, rng) {
+function stageChase(game, rng, cam) {
   // Full pursuit: Leo flooring it north up the avenue at three stars,
   // patrol cars fanned out behind him, the crew's job still on the HUD.
   // The car is taken first: its theft heat lands before the wanted level
@@ -184,20 +199,14 @@ function stageChase(game, rng) {
   // wants removes the newest ones first, so staging them after it would
   // delete the pack on the next frame and leave only the far spawns by
   // the station. Staged first, the resize counts them as the force.
-  const behind = [
+  const pack = [
     { x: -3.5, z: 64 },
     { x: 3.5, z: 72 },
     { x: -3.5, z: 80 },
   ];
-  for (const spot of behind) {
+  for (const spot of pack) {
     try {
-      const unit = game.police.spawnAt(spot, 'car');
-      if (unit) {
-        unit.group.position.set(spot.x, 0, spot.z);
-        unit.heading = Math.PI;
-        unit.group.rotation.y = Math.PI;
-        unit.speed = 20;
-      }
+      poseEntity(game.police.spawnAt(spot, 'car'), spot.x, spot.z, Math.PI, 20);
     } catch {
       // One missing patrol car must not sink the shot.
     }
@@ -207,13 +216,7 @@ function stageChase(game, rng) {
   // shot's proof the bikes are in the game.
   // Staged before the wanted level for the same reason as the cars.
   try {
-    const bike = game.police.spawnAt({ x: 0.5, z: 68 }, 'bike');
-    if (bike) {
-      bike.group.position.set(0.5, 0, 68);
-      bike.heading = Math.PI;
-      bike.group.rotation.y = Math.PI;
-      bike.speed = 24;
-    }
+    poseEntity(game.police.spawnAt({ x: 0.5, z: 68 }, 'bike'), 0.5, 68, Math.PI, 24);
   } catch {
     // The shot still works without the bike in frame.
   }
@@ -224,7 +227,9 @@ function stageChase(game, rng) {
     { x: -3.5, z: 8, heading: 0, speed: 11 },
     { x: 3.5, z: -30, heading: Math.PI, speed: 10 },
   ]);
-  game.cameraMode = 'chase';
+  // Camera variant: 'wide' pulls the reverse angle back and up so the
+  // whole pack reads at once. Default is the closer reverse angle.
+  game.cameraMode = cam === 'wide' ? 'chase-wide' : 'chase';
   void rng;
 }
 
@@ -247,11 +252,13 @@ function stageMission(game, rng) {
     { x: -123.5, z: -80, heading: Math.PI, speed: 9 },
     { x: -116.5, z: -16, heading: 0, speed: 10 },
   ]);
-  // A motorbike cruising the avenue ahead of Leo, oncoming and close
-  // enough to read — the mission shot's moving traffic.
+  // A motorbike on the avenue just ahead of Leo, close enough to read —
+  // the mission shot's moving traffic. It is held still (cruise 0) so
+  // the staging frame catches it exactly where it was placed instead of
+  // drifting off down a lane before the shutter.
   try {
-    const bike = game.vehicles.spawnBikeAt(-116.5, -62, 0);
-    if (bike) bike.speed = 11;
+    const bike = poseEntity(game.vehicles.spawnBikeAt(-114, -54, 0), -114, -54, 0, 0);
+    if (bike) bike.cruiseSpeed = 0;
   } catch {
     // Staging extras are optional; the shot still works without them.
   }
@@ -260,12 +267,7 @@ function stageMission(game, rng) {
     { x: -106, z: -38, heading: -1.4 },
   ]);
   try {
-    const officer = game.police.spawnAt({ x: -118, z: -56 }, 'officer');
-    if (officer) {
-      officer.group.position.set(-118, 0, -56);
-      officer.heading = Math.PI;
-      officer.group.rotation.y = Math.PI;
-    }
+    poseEntity(game.police.spawnAt({ x: -118, z: -56 }, 'officer'), -118, -56, Math.PI, 0);
   } catch {
     // The shot still works without the officer in frame.
   }
@@ -281,12 +283,12 @@ const STAGERS = {
 
 // Pose the scene for `shotName`. Returns true when a stager ran.
 // `seed` only jitters cosmetic details through the seeded RNG.
-export function applyShotStaging(game, shotName, seed) {
+export function applyShotStaging(game, shotName, seed, cam) {
   const stager = STAGERS[shotName];
   if (!stager || !game) return false;
   const rng = createRng((seed || 1) * 7919 + seedFromString(shotName));
   try {
-    stager(game, rng);
+    stager(game, rng, cam || null);
   } catch (err) {
     // Staging is best-effort: report it, keep the plain game running.
     if (typeof console !== 'undefined') console.warn('[shots] staging failed:', err);
