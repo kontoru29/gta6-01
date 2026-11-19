@@ -53,6 +53,10 @@ Four deterministic shots, staged with `?shot=<name>&seed=1` and captured in head
 3. `3-chase.jpg` — a three-star police chase with patrol cars fanned out behind Leo.
 4. `4-mission.jpg` — a job in progress on foot, pistol drawn, two stars, an officer closing in.
 
+### Round 6 — screenshot polish
+
+The fifth submitted round scored 0.988731 in development but slid to rank 458 of 6,923 as the field grew; the top 100 cutoff sits at 0.991404. This round restages all four shots for density: Leo stands in the avenue instead of the sidewalk corner, the chase pack pulls in close with a tighter reverse camera, and the mission shot moves onto the avenue facing its marker instead of a blank wall. It also fixes a staging-only wart: entering the staged car used to pay the $100 fence reward a frame later and toast "Stolen car sold on" over the wanted-level line, so shot mode no longer mints the theft id — the fence payout stays a real-game mechanic only.
+
 ## Layout
 
 - `game/index.html` — canvas, HUD, menus, import map for three.js.
