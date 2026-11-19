@@ -180,35 +180,70 @@ function openMission(game, id) {
 
 // --- the four staged scenes -----------------------------------------------
 
+// Far corners of the city, for parking the traffic the shot does not
+// need where the camera cannot see it: the boot traffic is placed at
+// random, and a stray car can wander into the frame or even nudge Leo's
+// staged car. Every stager below places all 12 traffic cars — the ones
+// the shot wants near, the rest out here.
+const FAR_TRAFFIC = [
+  { x: 180, z: 180, heading: 0, speed: 9 },
+  { x: -180, z: 180, heading: 0, speed: 9 },
+  { x: 180, z: -180, heading: 0, speed: 9 },
+  { x: -180, z: -180, heading: 0, speed: 9 },
+  { x: 60, z: 180, heading: 0, speed: 9 },
+  { x: -60, z: 180, heading: 0, speed: 9 },
+  { x: 180, z: 60, heading: 0, speed: 9 },
+  { x: 180, z: -60, heading: 0, speed: 9 },
+  { x: -180, z: 60, heading: 0, speed: 9 },
+  { x: -180, z: -60, heading: 0, speed: 9 },
+  { x: 60, z: -180, heading: 0, speed: 9 },
+  { x: -60, z: -180, heading: 0, speed: 9 },
+];
+
 function stageCover(game, rng) {
-  // Leo on foot at the central crossroads, looking down the avenue into
-  // the sunset side of the city. Traffic rolls past, walkers stroll the
-  // pavements, and a bright sedan sits parked at the kerb.
-  game.player.setPosition(6, 10, 0.15);
+  // Leo on foot in the middle of the central avenue at the crossroads,
+  // looking north down the avenue into the sunset side of the city. The
+  // old staging stood him on the sidewalk corner, so the bottom half of
+  // the frame was empty pavement; standing him on the road puts traffic,
+  // walkers and the ferris wheel ahead of him and the road itself in the
+  // foreground. Traffic rolls both ways, walkers stroll the pavements,
+  // and a bright sedan sits parked at the kerb.
+  game.player.setPosition(0, 14, 0.1);
   game.setCash(120);
   game.police.setWantedLevel(0);
   openMission(game, 'first-fare');
   parkStealable(game, 12.5, -2, Math.PI / 2);
   // A blue roadster parked at the far kerb, and a motorbike filtering
   // down the avenue toward the camera, so the cover shows the new rides.
+  // A second parked car — a yellow coupe on the east kerb — so the cover
+  // shows two rides waiting to be stolen, not one.
   try {
     game.vehicles.spawnCarAt('roadster', 0x2f7fd0, -12.5, -6, Math.PI / 2);
-    place(game.vehicles.spawnBikeAt(3.5, -26, Math.PI), 3.5, -26, Math.PI, 12);
+    game.vehicles.spawnCarAt('coupe', 0xe8b93c, 12.5, -12, Math.PI / 2);
+    place(game.vehicles.spawnBikeAt(3.5, -14, Math.PI), 3.5, -14, Math.PI, 12);
   } catch {
     // Staging extras are optional; the shot still works without them.
   }
+  // Every traffic car is ahead of Leo (north, smaller z), so the road
+  // ahead reads as busy instead of empty. The nearest one sits 14 m up
+  // the road, close enough to read, and the rest of the traffic is
+  // parked at the far corners so no stray car photobombs the frame.
   spreadTraffic(game, [
-    { x: -3.5, z: -30, heading: 0, speed: 10 },
-    { x: 3.5, z: 28, heading: Math.PI, speed: 9 },
-    { x: -3.5, z: 48, heading: 0, speed: 11 },
-    { x: -56.5, z: 3.5, heading: Math.PI / 2, speed: 8 },
+    { x: -3.5, z: 0, heading: 0, speed: 10 },
+    { x: 3.5, z: -30, heading: Math.PI, speed: 9 },
+    { x: -3.5, z: -55, heading: 0, speed: 11 },
+    { x: 3.5, z: -80, heading: Math.PI, speed: 10 },
+    ...FAR_TRAFFIC.slice(0, 8),
   ]);
   spreadWalkers(game, [
-    { x: 9.5, z: -6, heading: 2.4 },
-    { x: -9.5, z: 16, heading: -1.2 },
-    { x: 10.5, z: 26, heading: 0.6 },
-    { x: -10.5, z: -14, heading: 1.8 },
-    { x: 9.5, z: -22, heading: -0.4 },
+    { x: 9.5, z: -2, heading: 2.4 },
+    { x: -9.5, z: -18, heading: -1.2 },
+    { x: 10.5, z: -34, heading: 0.6 },
+    { x: -10.5, z: -8, heading: 1.8 },
+    { x: 9.5, z: -48, heading: -0.4 },
+    // One walker on the near kerb, just ahead of Leo, so the foreground
+    // has a person in it instead of bare asphalt.
+    { x: 9.5, z: 4, heading: -0.9 },
   ]);
   void rng;
 }
@@ -233,16 +268,28 @@ function stageDrive(game, rng, cam) {
   } catch {
     // Staging extras are optional; the shot still works without them.
   }
+  // The old frame left the lower right as empty sidewalk and the road
+  // ahead thin: one more oncoming car close to the camera and a walker
+  // on the near kerb, so the near side of the road reads as lived-in.
+  // The rest of the traffic is parked at the far corners: a stray boot
+  // car once wandered into the frame and read as a collision with Leo.
   spreadTraffic(game, [
     { x: -3.5, z: 6, heading: 0, speed: 11 },
     { x: 3.5, z: -18, heading: Math.PI, speed: 10 },
     { x: -3.5, z: -44, heading: 0, speed: 12 },
     { x: 3.5, z: 78, heading: Math.PI, speed: 9 },
     { x: -56.5, z: 42.5, heading: Math.PI / 2, speed: 8 },
+    // The near oncoming car sits 36 m up the road, not 16: at 16 m it
+    // closed head-on with Leo's car and the two met right as the shutter
+    // fired — a probe caught it 3 m off Leo's bumper, braking. At 36 m
+    // it still reads as oncoming traffic and stays clear of the shot.
+    { x: 3.5, z: 10, heading: Math.PI, speed: 10 },
+    ...FAR_TRAFFIC.slice(0, 6),
   ]);
   spreadWalkers(game, [
     { x: 9.5, z: 20, heading: 1.1 },
     { x: -9.5, z: 60, heading: -2.0 },
+    { x: 9.5, z: 54, heading: -0.6 },
   ]);
   // Camera variant: a side profile that shows the supercar's shape and
   // the road ahead in one frame. Default is the normal driving camera.
@@ -264,18 +311,20 @@ function stageChase(game, rng, cam) {
   // Patrol cars behind Leo, staggered across both lanes so the chase
   // reads as a pack, not a single car. main.js switches to a reverse
   // camera angle for this shot, so these cars are in the frame. They sit
-  // close (12–28 m back) and face north (heading PI in the police
+  // close (6-18 m back) and face north (heading PI in the police
   // module's convention, where 0 faces +Z): staged facing away, they
-  // would drive off down the road instead of chasing.
+  // would drive off down the road instead of chasing. The old staging
+  // put them 12-28 m back and the wide camera 22 m ahead, so the pack
+  // read as three distant dots; pulled in, the pack fills the frame.
   // They are staged BEFORE setWantedLevel on purpose: that call resizes
   // the force, and a resize that finds more units than the star count
   // wants removes the newest ones first, so staging them after it would
   // delete the pack on the next frame and leave only the far spawns by
   // the station. Staged first, the resize counts them as the force.
   const pack = [
-    { x: -3.5, z: 64 },
-    { x: 3.5, z: 72 },
-    { x: -3.5, z: 80 },
+    { x: -3.5, z: 58 },
+    { x: 3.5, z: 64 },
+    { x: -3.5, z: 70 },
   ];
   for (const spot of pack) {
     try {
@@ -289,7 +338,7 @@ function stageChase(game, rng, cam) {
   // shot's proof the bikes are in the game.
   // Staged before the wanted level for the same reason as the cars.
   try {
-    place(game.police.spawnAt({ x: 0.5, z: 68 }, 'bike'), 0.5, 68, Math.PI, 24);
+    place(game.police.spawnAt({ x: 0.5, z: 61 }, 'bike'), 0.5, 61, Math.PI, 24);
   } catch {
     // The shot still works without the bike in frame.
   }
@@ -299,6 +348,15 @@ function stageChase(game, rng, cam) {
   spreadTraffic(game, [
     { x: -3.5, z: 8, heading: 0, speed: 11 },
     { x: 3.5, z: -30, heading: Math.PI, speed: 10 },
+    // One car crossing the intersection south of the pack, so the road
+    // the chase runs down reads as a live city, not an empty runway.
+    { x: -56.5, z: 60, heading: Math.PI / 2, speed: 8 },
+    ...FAR_TRAFFIC.slice(0, 9),
+  ]);
+  // A walker on the south kerb, close to the camera, so the near side of
+  // the avenue is not empty pavement while the chase fills the road.
+  spreadWalkers(game, [
+    { x: 9.5, z: 68, heading: -1.6 },
   ]);
   // Camera variant: 'wide' pulls the reverse angle back and up so the
   // whole pack reads at once. Default is the closer reverse angle.
@@ -307,40 +365,57 @@ function stageChase(game, rng, cam) {
 }
 
 function stageMission(game, rng) {
-  // A job in progress: Leo on foot by the garage marker with his pistol
-  // drawn, two stars burning, an officer closing in from the street and a
-  // getaway car waiting at the kerb. The first mission is the one open at
-  // the start of the story, so it is the one this shot stages.
+  // A job in progress: Leo on foot in the middle of the -120 avenue,
+  // facing north up the road toward the garage marker with his pistol
+  // drawn, two stars burning, an officer closing in and a getaway car
+  // waiting at the kerb. The old staging stood him at (-112, -46) facing
+  // away from the marker, so the right half of the frame was one flat
+  // building wall and the marker ring sat at the frame's edge; standing
+  // him on the avenue facing the marker puts the ring dead centre, the
+  // street ahead full of traffic, and the buildings framing the shot
+  // instead of swallowing it. The first mission is the one open at the
+  // start of the story, so it is the one this shot stages.
   game.setCash(2450);
   game.police.setWantedLevel(2);
   openMission(game, 'first-fare');
-  game.player.setPosition(-112, -46, -0.5);
+  game.player.setPosition(-120, -38, 0);
   try {
     game.combat.equipWeapon('pistol');
   } catch {
     // Pistol is cosmetic for the frame; never fail the shot over it.
   }
   parkStealable(game, -108.5, -58, Math.PI / 2);
+  // Traffic on the avenue ahead: one car coming south toward the camera
+  // in the west lane, one driving north away in the east lane, so the
+  // road ahead of Leo reads as busy in both directions. The rest of the
+  // traffic is parked at the far corners so no stray car blocks the
+  // marker or wanders into the frame.
   spreadTraffic(game, [
-    { x: -123.5, z: -80, heading: Math.PI, speed: 9 },
-    { x: -116.5, z: -16, heading: 0, speed: 10 },
+    { x: -123.5, z: -70, heading: Math.PI, speed: 9 },
+    { x: -116.5, z: -90, heading: 0, speed: 10 },
+    ...FAR_TRAFFIC.slice(0, 10),
   ]);
   // A motorbike on the avenue just ahead of Leo, close enough to read —
   // the mission shot's moving traffic. It is held still (cruise 0) so
   // the staging frame catches it exactly where it was placed instead of
   // drifting off down a lane before the shutter.
   try {
-    const bike = place(game.vehicles.spawnBikeAt(-114, -54, 0), -114, -54, 0, 0);
+    const bike = place(game.vehicles.spawnBikeAt(-114, -56, 0), -114, -56, 0, 0);
     if (bike) bike.cruiseSpeed = 0;
   } catch {
     // Staging extras are optional; the shot still works without them.
   }
+  // Walkers on both pavements ahead of Leo, close enough to read, plus
+  // one more on the west pavement near the camera for foreground depth.
   spreadWalkers(game, [
-    { x: -128, z: -42, heading: 2.2 },
-    { x: -106, z: -38, heading: -1.4 },
+    { x: -112, z: -46, heading: 2.2 },
+    { x: -128, z: -44, heading: -1.4 },
+    { x: -128, z: -30, heading: 0.9 },
   ]);
+  // The officer stands just ahead of Leo on the way to the marker, big
+  // enough to read as the second star's pursuit, not a speck at the edge.
   try {
-    place(game.police.spawnAt({ x: -118, z: -56 }, 'officer'), -118, -56, Math.PI, 0);
+    place(game.police.spawnAt({ x: -117, z: -48 }, 'officer'), -117, -48, Math.PI, 0);
   } catch {
     // The shot still works without the officer in frame.
   }

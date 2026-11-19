@@ -190,8 +190,15 @@ const vehicles = createVehicleSystem(scene, cityAdapter, {
     // A stable id, taken once at the moment of the theft: deriving it from
     // the car's position would mint a fresh id every frame as the car
     // drives away, and the mission payout would fire again and again.
-    lastStolenCarId = 'stolen-' + car.type + '-'
-      + Math.round(car.group.position.x) + '-' + Math.round(car.group.position.z);
+    // In screenshot mode the staged car entries are not a real theft:
+    // minting the id would pay the $100 fence reward a frame later and
+    // toast "Stolen car sold on" over the wanted-level line, bumping the
+    // staged cash the shot is meant to show. So the id is only minted
+    // outside shot mode; the crime report and the notify still run.
+    if (!isShotMode) {
+      lastStolenCarId = 'stolen-' + car.type + '-'
+        + Math.round(car.group.position.x) + '-' + Math.round(car.group.position.z);
+    }
     if (missions) {
       const step = missions.getCurrentObjective();
       if (step && step.missionId === 'hot-wheels') stolenTargetCar = true;
@@ -825,17 +832,19 @@ function updateDrivingCamera(dt) {
   }
   if (shotCameraMode === 'chase-wide') {
     // Same reverse angle, pulled back and up: the whole patrol pack,
-    // bike included, reads in one frame.
+    // bike included, reads in one frame. Round 6 pulled it in closer
+    // (11 m ahead, 6.2 m up, looking 9 m back): the old 22 m pull-back
+    // left the pack as three distant dots and Leo's car as a small box.
     cameraDesired.set(
-      car.group.position.x + fwdX * 22 + rightX * 6,
-      CAMERA.drivingHeight + 3,
-      car.group.position.z + fwdZ * 22 + rightZ * 6,
+      car.group.position.x + fwdX * 11 + rightX * 3,
+      6.2,
+      car.group.position.z + fwdZ * 11 + rightZ * 3,
     );
     camera.position.lerp(cameraDesired, Math.min(1, dt * 5));
     cameraTarget.set(
-      car.group.position.x - fwdX * 16,
+      car.group.position.x - fwdX * 9,
       1.6,
-      car.group.position.z - fwdZ * 16,
+      car.group.position.z - fwdZ * 9,
     );
     camera.lookAt(cameraTarget);
     return;
@@ -843,7 +852,10 @@ function updateDrivingCamera(dt) {
   if (shotCameraMode === 'drive-side') {
     // Side profile: the camera sits off Leo's right flank and looks
     // forward past him, so the supercar's shape and the road ahead —
-    // including the oncoming bike — share the frame.
+    // including the oncoming bike — share the frame. Round 6 first tried
+    // a tighter angle (8 m out, 4.2 m up, 10 m ahead), but that pulled a
+    // parked car's roof into the bottom edge of the frame, so the
+    // original wider angle stays: 10 m out, 4.5 m up, 14 m ahead.
     cameraDesired.set(
       car.group.position.x - fwdX * 6 + rightX * 10,
       4.5,
