@@ -669,6 +669,14 @@ export function buildCity(scene, options = {}) {
     policeStation: { x: -90, z: 150 },
     beach: { x: -250, z: 0 },
     pier: { x: -260, z: 60 },
+    // Round 8: the North Docks yard, in the open north-east corner past
+    // the last road. The new missions and the side jobs name these
+    // points, and the marker lookup in main.js maps them through.
+    docks: { x: 215, z: -215 },
+    warehouse: { x: 228, z: -230 },
+    craneYard: { x: 202, z: -202 },
+    gate: { x: 210, z: -192 },
+    cache: { x: 224, z: -204 },
   };
 
   const spawnPoints = {

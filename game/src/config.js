@@ -9,7 +9,7 @@
 // --------------------------------------------------------------- who / where
 export const GAME_TITLE = 'Solmar Bay';
 export const GAME_SUBTITLE = 'A Marisol Bay story';
-export const GAME_VERSION = 'Round 7';
+export const GAME_VERSION = 'Round 8';
 export const PROTAGONIST_NAME = 'Leo Marlow';
 export const CREW_NAME = 'Marisol crew';
 
@@ -169,6 +169,25 @@ export const COMBAT = {
   shotgunFireInterval: 0.9,
   shotgunReloadTime: 2.2,
   shotgunSpread: 0.09,
+  // Round 8 adds the alley arsenal: an SMG for close work, a rifle for
+  // reaching across a plaza, and a bat for the quiet option.
+  smgDamage: 14,
+  smgRange: 34,
+  smgMagazine: 30,
+  smgReserveStart: 90,
+  smgFireInterval: 0.11,
+  smgReloadTime: 1.7,
+  smgSpread: 0.05,
+  rifleDamage: 55,
+  rifleRange: 90,
+  rifleMagazine: 6,
+  rifleReserveStart: 30,
+  rifleFireInterval: 0.85,
+  rifleReloadTime: 2.6,
+  rifleSpread: 0.005,
+  batDamage: 28,
+  batRange: 2.4,
+  batInterval: 0.45,
 };
 
 // Sprint stamina: running drains it, walking and standing refill it. Leo
@@ -182,7 +201,7 @@ export const STAMINA = {
 };
 
 // ------------------------------------------------------------ the story
-// Seven missions, in order. Rewards are dollars; the save file remembers
+// Ten missions, in order. Rewards are dollars; the save file remembers
 // which ones are finished.
 export const MISSIONS = [
   {
@@ -243,6 +262,30 @@ export const MISSIONS = [
     markerKey: 'showroom',
     targetKey: 'chop-shop',
   },
+  {
+    id: 'night-shift',
+    title: 'Night Shift at the Docks',
+    brief: 'Report to the North Docks, fetch the crate from the warehouse and run it to the dropoff.',
+    reward: 900,
+    markerKey: 'docks',
+    targetKey: 'dropoff',
+  },
+  {
+    id: 'storm-run',
+    title: 'Storm Run',
+    brief: 'Take the flatbed from the crane yard in the storm and run the load to the pier, then lose the heat.',
+    reward: 1400,
+    markerKey: 'craneYard',
+    targetKey: 'pier',
+  },
+  {
+    id: 'the-broker',
+    title: 'The Broker',
+    brief: 'Carry the broker’s ledger from the alley to the North Docks and hand it over clean.',
+    reward: 2000,
+    markerKey: 'alley',
+    targetKey: 'docks',
+  },
 ];
 
 export const MONEY = {
@@ -283,6 +326,10 @@ export const DISTRICTS = [
   {
     name: 'OLD TOWN', minX: -180, maxX: -60, minZ: -180, maxZ: 180,
     palette: [0xd9a679, 0x8a6f5c, 0xe9d8a6],
+  },
+  {
+    name: 'NORTH DOCKS', minX: 192, maxX: 238, minZ: -238, maxZ: -192,
+    palette: [0x8a8d90, 0xb8433a, 0x3a6db8],
   },
 ];
 
@@ -406,6 +453,94 @@ export const GAMEPLAY = {
   dayLengthSeconds: 600,
   startHour: 17,
   startMinute: 40,
+};
+
+// ------------------------------------------------------------ Round 8 systems
+// Day and night, weather, the garage, the side jobs, the alley arsenal
+// and the North Docks all tune from here. The weather module owns the
+// clock and the sky; the garage, side activities and arsenal own their
+// shops; the numbers below are the shared source of truth for prices,
+// payouts and grip so the modules never disagree.
+
+// A full day is 600 seconds of game time, split into dawn, day, dusk
+// and night. The weather system blends the light between these stops.
+export const WEATHER = {
+  dayLengthSeconds: 600,
+  startHour: 17,
+  startMinute: 40,
+  nightStartHour: 20,
+  nightEndHour: 6,
+  changeIntervalSeconds: 45,
+  rainChance: 0.3,
+  stormChance: 0.12,
+  fogChance: 0.15,
+  overcastChance: 0.35,
+  rainGrip: 0.88,
+  stormGrip: 0.78,
+  fogVisibility: 140,
+  stormVisibility: 180,
+  rainParticles: 600,
+  nightTopSpeedBonus: 0,
+};
+
+// The garage at (-120, -120): what a repaint, a set of wheels, an
+// engine stage and an armour stage cost, and what each stage buys.
+export const GARAGE = {
+  point: { x: -120, z: -120 },
+  radius: 12,
+  paintPrices: { standard: 150, premium: 200, exotic: 400 },
+  wheelPrices: { street: 0, sport: 400, muscle: 900, offroad: 700 },
+  enginePrices: [0, 800, 1600, 3200],
+  engineTopSpeedBonus: [0, 0.09, 0.18, 0.3],
+  engineAccelBonus: [0, 0.08, 0.16, 0.26],
+  armorPrices: [0, 600, 1200, 2400],
+  armorDamageReduction: [0, 0.12, 0.24, 0.36],
+};
+
+// Side jobs: taxi fares from the plaza, courier runs from the garage,
+// three street races and ten hidden packages around the city.
+export const SIDE = {
+  taxiPoint: 'plaza',
+  taxiRadius: 14,
+  taxiBasePay: 60,
+  taxiPerMetre: 0.35,
+  taxiTimeBonus: 40,
+  courierPoint: 'garage',
+  courierRadius: 10,
+  courierBasePay: 100,
+  courierPerMetre: 0.5,
+  courierTimeBonus: 60,
+  raceRewards: { 'plaza-loop': 300, 'beach-sprint': 350, 'docks-dash': 400 },
+  raceParSeconds: { 'plaza-loop': 75, 'beach-sprint': 60, 'docks-dash': 70 },
+  packageReward: 100,
+  packageCount: 10,
+};
+
+// The alley arsenal at (-60, -60): hardware prices and ammo boxes.
+export const ARSENAL = {
+  point: { x: -60, z: -60 },
+  radius: 10,
+  weaponPrices: { bat: 300, smg: 1200, rifle: 2500 },
+  ammoIncluded: { smg: 90, rifle: 30 },
+  ammoPackPrices: { pistol: 40, shotgun: 80, smg: 60, rifle: 120 },
+  ammoPackAmounts: { pistol: 24, shotgun: 16, smg: 60, rifle: 20 },
+};
+
+// The North Docks yard: where it sits, how many hands work it, and
+// what the smuggler's cache pays.
+export const DOCKS = {
+  minX: 192, maxX: 238, minZ: -238, maxZ: -192,
+  centreX: 215, centreZ: -215,
+  points: {
+    docks: { x: 215, z: -215 },
+    warehouse: { x: 228, z: -230 },
+    craneYard: { x: 202, z: -202 },
+    gate: { x: 210, z: -192 },
+    cache: { x: 224, z: -204 },
+  },
+  workerCount: 3,
+  craneCount: 2,
+  cacheReward: 150,
 };
 
 // Fixed seeds so every staged screenshot renders the same way twice.

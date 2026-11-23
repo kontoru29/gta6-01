@@ -95,6 +95,45 @@ export const WEAPONS = {
     spreadRadians: COMBAT.shotgunSpread,
     tracerSeconds: 0.09,
   },
+  // Round 8: the alley arsenal's stock. The SMG sprays close in, the
+  // rifle reaches across a plaza, and the bat is a melee weapon — it
+  // uses the punch path, not the shooting path.
+  smg: {
+    name: 'smg',
+    displayName: 'SMG',
+    damage: COMBAT.smgDamage,
+    range: COMBAT.smgRange,
+    magazineSize: COMBAT.smgMagazine,
+    reserveStart: COMBAT.smgReserveStart,
+    reserveMax: 240,
+    cooldownSeconds: COMBAT.smgFireInterval,
+    reloadSeconds: COMBAT.smgReloadTime,
+    spreadRadians: COMBAT.smgSpread,
+    tracerSeconds: 0.06,
+  },
+  rifle: {
+    name: 'rifle',
+    displayName: 'Rifle',
+    damage: COMBAT.rifleDamage,
+    range: COMBAT.rifleRange,
+    magazineSize: COMBAT.rifleMagazine,
+    reserveStart: COMBAT.rifleReserveStart,
+    reserveMax: 90,
+    cooldownSeconds: COMBAT.rifleFireInterval,
+    reloadSeconds: COMBAT.rifleReloadTime,
+    spreadRadians: COMBAT.rifleSpread,
+    tracerSeconds: 0.1,
+  },
+  bat: {
+    name: 'bat',
+    displayName: 'Baseball Bat',
+    damage: COMBAT.batDamage,
+    range: COMBAT.batRange,
+    arcRadians: 1.25,
+    cooldownSeconds: COMBAT.batInterval,
+    spreadRadians: 0,
+    melee: true,
+  },
 };
 
 const FLASH_SECONDS = 0.055;
@@ -145,7 +184,13 @@ export function createCombatSystem(options = {}) {
   const ammoStores = {
     pistol: { inMagazine: WEAPONS.pistol.magazineSize, reserve: WEAPONS.pistol.reserveStart },
     shotgun: { inMagazine: WEAPONS.shotgun.magazineSize, reserve: WEAPONS.shotgun.reserveStart },
+    smg: { inMagazine: WEAPONS.smg.magazineSize, reserve: WEAPONS.smg.reserveStart },
+    rifle: { inMagazine: WEAPONS.rifle.magazineSize, reserve: WEAPONS.rifle.reserveStart },
   };
+  // Round 8: the SMG, the rifle and the bat are bought at the alley
+  // arsenal, so they stay locked until the shop unlocks them. Fists,
+  // pistol and shotgun are Leo's from the start.
+  const unlockedWeapons = new Set(['fists', 'pistol', 'shotgun']);
   let cooldown = 0;
   let reloading = false;
   let reloadTimer = 0;
@@ -266,7 +311,7 @@ export function createCombatSystem(options = {}) {
   }
 
   function crimeTypeForHit(target, weaponName) {
-    if (weaponName === 'fists') return 'assault';
+    if (weaponName === 'fists' || weaponName === 'bat') return 'assault';
     if (target.kind === 'police' || target.isPolice) return 'shooting';
     if (target.kind === 'pedestrian') return 'shooting';
     return 'shooting';
@@ -318,8 +363,22 @@ export function createCombatSystem(options = {}) {
 
   // -- Public API -----------------------------------------------------------
 
+  function unlockWeapon(name) {
+    if (!WEAPONS[name]) return false;
+    unlockedWeapons.add(name);
+    return true;
+  }
+
+  function isWeaponUnlocked(name) {
+    return unlockedWeapons.has(name);
+  }
+
   function equipWeapon(name) {
-    if (name !== 'fists' && name !== 'pistol' && name !== 'shotgun') return false;
+    if (!WEAPONS[name]) return false;
+    // Round 8: the arsenal's weapons stay locked until Leo buys them.
+    // The shop unlocks them through unlockWeapon; pressing 4, 5 or 6
+    // on a fresh save is a no-op, not a bug.
+    if (!unlockedWeapons.has(name)) return false;
     if (name === currentWeapon) return true;
     if (reloading) {
       reloading = false;
@@ -464,8 +523,12 @@ export function createCombatSystem(options = {}) {
     const facing = toVector3(facingValue);
     if (facing.lengthSq() < 0.0001) return emptyResult('noTarget');
     // Fists are always available: a punch works whatever weapon is equipped.
+    // Round 8: the bat is a melee weapon too, so the punch reads the
+    // current weapon's melee stats (damage, range, arc, cooldown) when
+    // Leo is holding it, and the hit is reported as a bat swing.
     if (cooldown > 0) return emptyResult('cooldown');
-    const weapon = WEAPONS.fists;
+    const meleeName = currentWeapon === 'bat' ? 'bat' : 'fists';
+    const weapon = WEAPONS[meleeName];
     cooldown = weapon.cooldownSeconds;
     facing.normalize();
 
@@ -501,9 +564,9 @@ export function createCombatSystem(options = {}) {
     };
     if (best) {
       // A punch that lands is an assault even before anyone dies.
-      finishAttack(result, best, 'fists', result.point);
+      finishAttack(result, best, meleeName, result.point);
     }
-    if (onShot) onShot({ fired: true, weapon: 'fists', point: result.point, target: best });
+    if (onShot) onShot({ fired: true, weapon: meleeName, point: result.point, target: best });
     return result;
   }
 
@@ -548,14 +611,31 @@ export function createCombatSystem(options = {}) {
     }
   }
 
-  function addAmmo(amount) {
-    // Ammo goes to the gun in hand; fists send it to the pistol reserve.
-    const key = currentWeapon === 'shotgun' ? 'shotgun' : 'pistol';
+  function addAmmo(weaponOrAmount, amount) {
+    // Two shapes: addAmmo(amount) tops up the gun in hand (the old
+    // pickups path), addAmmo('smg', 60) tops up a named gun (the
+    // arsenal shop). Fists and the bat take no ammo.
+    let key;
+    let qty;
+    if (typeof weaponOrAmount === 'string') {
+      key = weaponOrAmount;
+      qty = amount || 0;
+    } else {
+      qty = weaponOrAmount || 0;
+      key = currentWeapon;
+    }
     const store = ammoStores[key];
     const weapon = WEAPONS[key];
-    store.reserve = clampValue(store.reserve + Math.max(0, amount), 0, weapon.reserveMax);
+    if (!store || !weapon) return 0;
+    store.reserve = clampValue(store.reserve + Math.max(0, qty), 0, weapon.reserveMax);
     announceAmmo();
     return store.reserve;
+  }
+
+  function getAmmoFor(weaponId) {
+    const store = ammoStores[weaponId];
+    if (!store) return { inMagazine: 0, reserve: 0, reloading };
+    return { inMagazine: store.inMagazine, reserve: store.reserve, reloading };
   }
 
   function reset() {
@@ -564,6 +644,10 @@ export function createCombatSystem(options = {}) {
     ammoStores.pistol.reserve = WEAPONS.pistol.reserveStart;
     ammoStores.shotgun.inMagazine = WEAPONS.shotgun.magazineSize;
     ammoStores.shotgun.reserve = WEAPONS.shotgun.reserveStart;
+    ammoStores.smg.inMagazine = WEAPONS.smg.magazineSize;
+    ammoStores.smg.reserve = WEAPONS.smg.reserveStart;
+    ammoStores.rifle.inMagazine = WEAPONS.rifle.magazineSize;
+    ammoStores.rifle.reserve = WEAPONS.rifle.reserveStart;
     cooldown = 0;
     reloading = false;
     reloadTimer = 0;
@@ -603,7 +687,10 @@ export function createCombatSystem(options = {}) {
     },
     get reloading() { return reloading; },
     equipWeapon,
+    unlockWeapon,
+    isWeaponUnlocked,
     getWeapon: () => currentWeapon,
+    getWeaponId: () => currentWeapon,
     getAmmo: () => {
       const store = currentAmmoStore();
       return {
@@ -612,8 +699,10 @@ export function createCombatSystem(options = {}) {
         reloading,
       };
     },
-    // Spare rounds across both guns, for a future ammo HUD total.
-    getTotalReserve: () => ammoStores.pistol.reserve + ammoStores.shotgun.reserve,
+    getAmmoFor,
+    // Spare rounds across all four guns, for a future ammo HUD total.
+    getTotalReserve: () => ammoStores.pistol.reserve + ammoStores.shotgun.reserve
+      + ammoStores.smg.reserve + ammoStores.rifle.reserve,
     shoot,
     punch,
     reload,

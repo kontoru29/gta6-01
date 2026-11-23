@@ -109,6 +109,11 @@ export const DEFAULT_POINTS = {
   rooftop: { x: 120, z: -180 },
   beach: { x: -250, z: 0 },
   dropoff: { x: 120, z: 60 },
+  docks: { x: 215, z: -215 },
+  warehouse: { x: 228, z: -230 },
+  craneYard: { x: 202, z: -202 },
+  gate: { x: 210, z: -192 },
+  cache: { x: 224, z: -204 },
   jumpNorth: { x: 0, z: -215 },
   jumpSouth: { x: 0, z: 215 },
   jumpEast: { x: 215, z: 0 },
@@ -153,7 +158,7 @@ const PHOTO_SPOTS = [
 ];
 
 /**
- * The seven story missions. A step is one small job:
+ * The ten story missions. A step is one small job:
  *   kind 'driveTo'    — reach a marker while driving a car
  *   kind 'timedDrive' — reach a marker while driving, before the clock ends
  *   kind 'goTo'       — reach a marker on foot or in a car
@@ -362,6 +367,133 @@ export const MISSION_DEFINITIONS = [
         point: 'safehouse',
         text: 'Escape to the safehouse with the money',
         dialogue: 'June: "Four stars and counting. Take the beach road — fewer cruisers."',
+      },
+    ],
+  },
+  {
+    id: 'night-shift',
+    title: 'Night Shift at the Docks',
+    reward: 900,
+    briefing:
+      'June: "The North Docks run a night shift that is not on any roster, ' +
+      'and tonight the crew is short a driver. Report to the docks, pick up ' +
+      'the crate from the warehouse, and run it to the dropoff before the ' +
+      'yard gates close. The workers know the drill — do not make them wait."',
+    steps: [
+      {
+        id: 'report-docks',
+        kind: 'goTo',
+        point: 'docks',
+        text: 'Report to the North Docks',
+        dialogue: 'June: "Gate is open, Leo. The yard is yours tonight."',
+      },
+      {
+        id: 'fetch-crate',
+        kind: 'walkTo',
+        point: 'warehouse',
+        text: 'Walk into the warehouse and find the crate',
+        dialogue: 'Theo: "Third stack on the left, marked with a blue tag. Bring it out."',
+      },
+      {
+        id: 'grab-crate',
+        kind: 'grab',
+        point: 'warehouse',
+        text: 'Grab the crate from the warehouse floor (stand in the marker)',
+        dialogue: 'Mara: "Careful with that one — it is worth more than the car you drove in."',
+      },
+      {
+        id: 'run-dropoff',
+        kind: 'timedDrive',
+        point: 'dropoff',
+        timeLimit: 100,
+        text: 'Run the crate to the dropoff before the yard gates close (100 seconds)',
+        dialogue: 'June: "One hundred seconds. The dropoff, east side. Go."',
+      },
+    ],
+  },
+  {
+    id: 'storm-run',
+    title: 'Storm Run',
+    reward: 1400,
+    briefing:
+      'Mara: "A storm is rolling in off the bay and the harbour police are ' +
+      'pulling back to the station — which means the crane yard is wide ' +
+      'open. Take the flatbed parked under the big crane, run the load to ' +
+      'the pier, and then lose whatever heat follows you. Rain makes the ' +
+      'roads slick, Leo, so drive like the weather owes you money."',
+    steps: [
+      {
+        id: 'reach-crane-yard',
+        kind: 'driveTo',
+        point: 'craneYard',
+        text: 'Drive to the crane yard at the North Docks',
+        dialogue: 'Rico: "Rain on the windscreen, hook swinging overhead. That is your flatbed."',
+      },
+      {
+        id: 'take-flatbed',
+        kind: 'stealCar',
+        point: 'craneYard',
+        text: 'Take the flatbed under the crane (press F near it)',
+        dialogue: 'Mara: "She is loaded already. Do not ask what is in the back."',
+      },
+      {
+        id: 'storm-drive',
+        kind: 'timedDrive',
+        point: 'pier',
+        timeLimit: 90,
+        needsWanted: 2,
+        text: 'Run the load to the pier in the storm (90 seconds)',
+        dialogue: 'June: "Two stars and the rain is getting worse. Ninety seconds, Leo."',
+      },
+      {
+        id: 'lose-heat',
+        kind: 'loseWanted',
+        point: 'safehouse',
+        text: 'Lose the heat and get back to the safehouse',
+        dialogue: 'Theo: "Cut through the old town. They never patrol the old town in a storm."',
+      },
+    ],
+  },
+  {
+    id: 'the-broker',
+    title: 'The Broker',
+    reward: 2000,
+    briefing:
+      'Theo: "There is a man in the alley who brokers jobs for half the ' +
+      'crews in the bay, and he has a ledger that says too much. Pick the ' +
+      'ledger up from him, carry it to the docks, and do not let the police ' +
+      'take it off you. If the heat gets bad, lose it before you hand the ' +
+      'ledger over — the docks do not take deliveries with cruisers behind them."',
+    steps: [
+      {
+        id: 'meet-broker',
+        kind: 'walkTo',
+        point: 'alley',
+        text: 'Meet the broker in the alley on foot',
+        dialogue: 'Theo: "He is in the shadows by the dumpster. Grey coat, no hat."',
+      },
+      {
+        id: 'carry-ledger',
+        kind: 'carryTo',
+        point: 'alley',
+        dest: 'docks',
+        text: 'Carry the ledger from the alley to the North Docks',
+        dialogue: 'Broker: "Two thousand dollars of names in that book. Do not drop it."',
+      },
+      {
+        id: 'docks-heat',
+        kind: 'loseWanted',
+        point: 'docks',
+        needsWanted: 2,
+        text: 'The police are on to the ledger — lose the heat at the docks',
+        dialogue: 'Mara: "Two stars. Shake them before you hand anything over."',
+      },
+      {
+        id: 'hand-over',
+        kind: 'grab',
+        point: 'docks',
+        text: 'Hand the ledger over at the docks (stand in the marker)',
+        dialogue: 'June: "Ledger delivered. Two thousand, clean. The broker sends his regards."',
       },
     ],
   },

@@ -365,6 +365,11 @@ export class SolmarHud {
     this.staminaWrapEl = byId('hud-stamina-bar-wrap');
     this.weaponEl = byId('hud-weapon');
     this.speedEl = byId('hud-speed');
+    // Round 8: the weather line under the clock and the active side-job
+    // line under the objective. Both are optional in the DOM: older
+    // index.html files simply leave them null and the HUD skips them.
+    this.weatherEl = byId('hud-weather');
+    this.sideEl = byId('hud-side');
     this.objectiveTitleEl = byId('hud-objective-title');
     this.objectiveTextEl = byId('hud-objective-text');
     this.objectiveStepEl = byId('hud-objective-step');
@@ -381,6 +386,8 @@ export class SolmarHud {
     this.lastObjectiveKey = '';
     this.lastCash = null;
     this.lastStars = -1;
+    this.lastWeather = '';
+    this.lastSide = '';
     this.minimapPulse = 0;
   }
 
@@ -395,7 +402,9 @@ export class SolmarHud {
   // One frame of HUD painting. `snap` is a plain object from main.js:
   // { health, stamina, cash, stars, speedMps, weaponName, ammoInMag,
   //   ammoReserve, reloading, clockHour, clockMinute, objective
-  //   {title,text,step,steps,dialogue}, prompt, driving, aiming }
+  //   {title,text,step,steps,dialogue}, prompt, driving, aiming,
+  //   weatherName, isNight, sideActive {text,timeLeft}, sideStats,
+  //   garageNear, arsenalNear }
   update(snap, dt) {
     if (!snap) return;
     const step = dt || 0;
@@ -423,11 +432,34 @@ export class SolmarHud {
     if (this.clockEl) {
       this.clockEl.textContent = formatClock(snap.clockHour || 17, snap.clockMinute || 40);
     }
+    // Round 8: the weather line reads the label the weather system
+    // hands over (Clear, Overcast, Rain, Storm, Fog) plus a night tag,
+    // and the side-job line shows the active fare, parcel or race with
+    // its countdown. Both only write when the text changes.
+    if (this.weatherEl) {
+      const text = (snap.weatherName || 'Clear') + (snap.isNight ? ' · Night' : '');
+      if (text !== this.lastWeather) {
+        this.weatherEl.textContent = text;
+        this.lastWeather = text;
+      }
+    }
+    if (this.sideEl) {
+      const active = snap.sideActive;
+      const text = active ? `${active.text} — ${active.timeLeft}s left` : '';
+      if (text !== this.lastSide) {
+        this.sideEl.textContent = text;
+        this.lastSide = text;
+      }
+    }
     if (this.weaponEl) {
-      const name = snap.weaponName === 'pistol' ? 'Pistol'
-        : snap.weaponName === 'shotgun' ? 'Shotgun' : 'Fists';
+      const names = {
+        pistol: 'Pistol', shotgun: 'Shotgun', smg: 'SMG',
+        rifle: 'Rifle', bat: 'Baseball Bat',
+      };
+      const name = names[snap.weaponName] || 'Fists';
       let ammo = '';
-      if (snap.weaponName === 'pistol' || snap.weaponName === 'shotgun') {
+      if (snap.weaponName === 'pistol' || snap.weaponName === 'shotgun'
+        || snap.weaponName === 'smg' || snap.weaponName === 'rifle') {
         ammo = ` <span class="ammo">${snap.ammoInMag} / ${snap.ammoReserve}</span>`;
         if (snap.reloading) ammo += ' — reloading…';
       }

@@ -249,7 +249,13 @@ function buildCarBody(type, colour) {
     body.add(cap);
   }
 
-  return { group: body, length, width, rearLightMat: rearLight, reverseLightMat: reverseLight };
+  return {
+    group: body, length, width,
+    rearLightMat: rearLight, reverseLightMat: reverseLight,
+    // Round 8: the paint material is kept so the garage can repaint a
+    // car in place instead of rebuilding its body.
+    paintMat: paint,
+  };
 }
 
 export function createCar(scene, type = 'sedan', colour = 0xe23b3b, x = 0, z = 0, heading = 0) {
@@ -279,6 +285,10 @@ export function createCar(scene, type = 'sedan', colour = 0xe23b3b, x = 0, z = 0
     engineDead: false,
     boostMeter: 1,
     boosting: false,
+    // Round 8: garage tuning rides on the car (engine, wheels, armour)
+    // and the paint material rides with it for repaints.
+    tuning: null,
+    paintMat: built.paintMat,
     rearLightMat: built.rearLightMat,
     reverseLightMat: built.reverseLightMat,
     laneIndex: 0,
@@ -484,6 +494,10 @@ export function createVehicleSystem(scene, city = {}, options = {}) {
   const bikes = [];
   let playerCar = null;
   let spawnCursor = 0;
+  // Round 8: the weather grip the weather system hands over every
+  // frame (1.0 dry, 0.88 rain, 0.78 storm). It scales top speed,
+  // acceleration and steering response in driveStep.
+  let weatherGrip = 1;
 
   // Sport cars are rare by design: most spawns are plain body styles.
   function chooseSpawnType(cycleIndex, sportChance) {
@@ -576,6 +590,17 @@ export function createVehicleSystem(scene, city = {}, options = {}) {
     const isSport = SPORT_BODIES.includes(car.type);
     let topSpeed = TOP_SPEEDS[car.type];
     let accel = ACCELERATION[car.type];
+    // Round 8: garage tuning first, weather grip second. A tuned car
+    // carries its engine and wheel bonuses on top of the base numbers,
+    // and rain and storm then scale everything down — traffic cars feel
+    // the weather too, since they share driveStep.
+    const tuning = car.tuning || null;
+    if (tuning) {
+      topSpeed *= 1 + (tuning.topSpeedBonus || 0);
+      accel *= 1 + (tuning.accelBonus || 0);
+    }
+    topSpeed *= weatherGrip;
+    accel *= weatherGrip;
     // Boost: Shift in a sport car. Instant surge while the meter lasts;
     // it refills once you lift off.
     if (boostKey && isSport && car.boostMeter > 0) {
@@ -605,7 +630,9 @@ export function createVehicleSystem(scene, city = {}, options = {}) {
     // handbrake loosens it on purpose so the tail slides.
     const speedFactor = Math.min(1, Math.abs(car.speed) / 12);
     const targetSteer = steerInput * STEER_LOCK * (0.45 + 0.55 * (1 - speedFactor * 0.6));
-    const steerResponse = STEER_SPEED * (handbrake ? GRIP_HANDBRAKE / GRIP_NORMAL : 1);
+    // Round 8: the weather grip loosens the steering response, so a
+    // storm chase feels slippery instead of identical to a dry one.
+    const steerResponse = STEER_SPEED * (handbrake ? GRIP_HANDBRAKE / GRIP_NORMAL : 1) * weatherGrip;
     car.steer += (targetSteer - car.steer) * Math.min(1, dt * steerResponse);
     const direction = car.speed >= 0 ? 1 : -1;
     car.heading += car.steer * dt * direction * Math.min(1, Math.abs(car.speed) / 4 + 0.25);
@@ -848,6 +875,30 @@ export function createVehicleSystem(scene, city = {}, options = {}) {
       player = p;
     },
 
+    // Round 8: the weather system hands the grip over every frame, and
+    // the garage hands a car its tuning and its paint. The tuning object
+    // rides on the car so driveStep can read it without a lookup.
+    setWeatherGrip(grip) {
+      weatherGrip = Math.max(0.5, Math.min(1, Number(grip) || 1));
+    },
+
+    getWeatherGrip() {
+      return weatherGrip;
+    },
+
+    repaintCar(car, hex) {
+      if (!car || !car.paintMat) return false;
+      car.paintMat.color.setHex(hex);
+      car.colour = hex;
+      return true;
+    },
+
+    applyTuning(car, tuning) {
+      if (!car) return false;
+      car.tuning = tuning || null;
+      return true;
+    },
+
     spawnParked(count = 8) {
       const made = [];
       for (let i = 0; i < count; i += 1) {
@@ -1012,8 +1063,13 @@ export function createVehicleSystem(scene, city = {}, options = {}) {
     },
 
     // Police module hooks: damage the player's car, or kill its engine.
+    // Round 8: garage armour plates the car, so a tuned car takes less
+    // of the hit — the reduction rides on the car's tuning object.
     damagePlayerCar(amount) {
-      if (playerCar) playerCar.damage(amount);
+      if (playerCar) {
+        const reduction = (playerCar.tuning && playerCar.tuning.damageReduction) || 0;
+        playerCar.damage(amount * (1 - reduction));
+      }
     },
 
     stopPlayerCar() {

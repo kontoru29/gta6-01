@@ -159,6 +159,18 @@ export function createDefaultSave() {
       timesBusted: 0,
       timesWasted: 0,
     },
+    // Round 8: the garage owns Leo's tuning, the arsenal owns his
+    // bought weapons, and the side block owns his job progress and the
+    // hidden packages he has already collected.
+    garage: { paint: null, wheels: 'street', engine: 0, armor: 0 },
+    arsenal: { owned: [] },
+    side: {
+      faresDone: 0,
+      deliveriesDone: 0,
+      racesWon: 0,
+      racesBest: {},
+      packagesFound: [],
+    },
     settings: { muted: false },
     createdAt: now,
     updatedAt: now,
@@ -190,6 +202,37 @@ export function sanitizeSave(raw) {
 
   const settingsIn = toObject(input.settings);
   clean.settings.muted = settingsIn.muted === true;
+
+  // Round 8: the garage, arsenal and side blocks. Each one is rebuilt
+  // from the default and only keeps values that check out, so a save
+  // from before Round 8 upgrades silently and a hand-edited one falls
+  // back to stock instead of crashing the shop.
+  const garageIn = toObject(input.garage);
+  clean.garage.paint = typeof garageIn.paint === 'number' && Number.isFinite(garageIn.paint)
+    ? garageIn.paint
+    : null;
+  clean.garage.wheels = ['street', 'sport', 'muscle', 'offroad'].includes(garageIn.wheels)
+    ? garageIn.wheels
+    : 'street';
+  clean.garage.engine = toClampedInt(garageIn.engine, 0, 0, 3);
+  clean.garage.armor = toClampedInt(garageIn.armor, 0, 0, 3);
+
+  const arsenalIn = toObject(input.arsenal);
+  clean.arsenal.owned = toIdArray(arsenalIn.owned)
+    .filter((id) => id === 'bat' || id === 'smg' || id === 'rifle');
+
+  const sideIn = toObject(input.side);
+  clean.side.faresDone = toClampedInt(sideIn.faresDone, 0, 0, STAT_CAP);
+  clean.side.deliveriesDone = toClampedInt(sideIn.deliveriesDone, 0, 0, STAT_CAP);
+  clean.side.racesWon = toClampedInt(sideIn.racesWon, 0, 0, STAT_CAP);
+  const racesBestIn = toObject(sideIn.racesBest);
+  clean.side.racesBest = {};
+  for (const key of Object.keys(racesBestIn)) {
+    const time = toNumber(racesBestIn[key], null);
+    if (typeof time === 'number' && time > 0 && time < 3600) clean.side.racesBest[key] = time;
+  }
+  clean.side.packagesFound = toIdArray(sideIn.packagesFound)
+    .filter((id) => id.indexOf('pkg-') === 0);
 
   clean.createdAt = toText(input.createdAt, clean.createdAt);
   clean.updatedAt = toText(input.updatedAt, clean.updatedAt);

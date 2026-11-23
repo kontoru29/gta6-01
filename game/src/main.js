@@ -17,6 +17,15 @@
 // now hurt Leo a little as well as his car, and the driving camera eases
 // closer as the car slows down. The menu save note counts seven missions.
 //
+// Round 8: the bay has weather now — a full day and night cycle with
+// clear, overcast, rain, storm and fog states that change the light, the
+// grip and the rain on the windscreen — plus the North Docks district
+// (containers, cranes, a warehouse and yard hands), a garage where Leo
+// tunes whatever he is driving, taxi fares and courier runs, three
+// street races, ten hidden packages, an alley arsenal selling an SMG, a
+// rifle and a bat, and three new missions that send Leo to the docks
+// after dark. The menu save note counts ten missions.
+//
 // Nothing in here loads over the network: every import is a file under
 // game/, and three.js comes from the vendored import map in index.html.
 //
@@ -56,6 +65,11 @@ import {
 import { SolmarHud } from './hud.js';
 import { AudioEngine } from './audio.js';
 import { readShotParams, applyShotStaging } from './shots.js';
+import { createWeatherSystem } from './weather.js';
+import { createDistrictSystem } from './district.js';
+import { createGarageSystem } from './customization.js';
+import { createSideActivitySystem } from './sideactivities.js';
+import { createArsenalSystem } from './arsenal.js';
 
 // ---------------------------------------------------------------------------
 // Small adapters between modules that describe the world differently.
@@ -99,6 +113,13 @@ function buildMarkerLookup(world) {
     showroom: 'showroom',
     'chop-shop': 'chop-shop',
     policeStation: 'policeStation',
+    // Round 8: the North Docks yard, built by city.js as its own
+    // markers so the new missions and the side jobs can name them.
+    docks: 'docks',
+    warehouse: 'warehouse',
+    craneYard: 'craneYard',
+    gate: 'gate',
+    cache: 'cache',
   };
   const jumpPoints = {
     jumpNorth: { x: 0, z: -215 },
@@ -280,7 +301,19 @@ const combat = createCombatSystem({
       audio.shot();
       const pos = player.group.position;
       pedestrians.addThreat(pos.x, pos.z, 26, 'gunshot');
+    } else if (info && info.weapon === 'smg') {
+      audio.shot();
+      const pos = player.group.position;
+      pedestrians.addThreat(pos.x, pos.z, 26, 'gunshot');
+    } else if (info && info.weapon === 'rifle') {
+      audio.shotgun();
+      const pos = player.group.position;
+      pedestrians.addThreat(pos.x, pos.z, 40, 'gunshot');
     } else if (info && info.weapon === 'fists') {
+      audio.punch();
+      const pos = player.group.position;
+      pedestrians.addThreat(pos.x, pos.z, 10, 'attack');
+    } else if (info && info.weapon === 'bat') {
       audio.punch();
       const pos = player.group.position;
       pedestrians.addThreat(pos.x, pos.z, 10, 'attack');
@@ -304,6 +337,71 @@ const missions = createMissionManager({
     cash = updated.cash;
     void reason;
   },
+});
+
+// --- Round 8 systems: weather, the docks, the garage, side jobs, arsenal.
+// The shops never touch the cash balance directly: they spend through
+// spendCash and earn through addCashToSave, so the save file is the one
+// source of truth and the HUD mirror (cash) is reloaded after each one.
+function getCash() { return cash; }
+function spendCash(amount) {
+  const price = Math.floor(amount || 0);
+  if (price <= 0) return true;
+  if (cash < price) return false;
+  cash -= price;
+  updateSave((s) => { s.cash = cash; });
+  return true;
+}
+function earnCash(amount, reason) {
+  // addCashToSave(save, amount) takes a save object, so the earning path
+  // goes through updateSave directly: add the gain to the cash balance
+  // and to lifetime earnings, then mirror the saved balance into the
+  // HUD's cash variable.
+  const gain = Math.max(0, Math.floor(amount || 0));
+  if (gain <= 0) return;
+  updateSave((s) => {
+    s.cash = Math.min(999999999, (s.cash || 0) + gain);
+    if (s.stats) s.stats.cashEarned = (s.stats.cashEarned || 0) + gain;
+  });
+  cash = loadSave().cash;
+  void reason;
+}
+
+// The weather owns the sky and the rain; it reads the same clock main.js
+// keeps for the HUD, so the sun never disagrees with the clock.
+const weather = createWeatherSystem({ scene, lights: world.lights });
+// The North Docks yard: containers, cranes, warehouse, yard hands and
+// the smuggler's cache, all built once at boot.
+const district = createDistrictSystem({ scene, world });
+// The garage tunes whatever Leo is driving; the arsenal sells hardware
+// out of the alley; both write their purchases into the save file.
+const garage = createGarageSystem({
+  vehicles,
+  save: { loadSave, updateSave },
+  hud,
+  getCash,
+  spendCash,
+});
+const arsenal = createArsenalSystem({
+  combat,
+  save: { loadSave, updateSave },
+  hud,
+  getCash,
+  spendCash,
+});
+// Weapons Leo already owns from an earlier session unlock in the combat
+// system at boot, so keys 4, 5 and 6 work from the first frame.
+for (const weaponId of arsenal.getOwned()) {
+  combat.unlockWeapon(weaponId);
+}
+// Side jobs — taxi fares, courier runs, street races, hidden packages —
+// pay through the same earn path as the missions.
+const side = createSideActivitySystem({
+  scene,
+  city: markerCity,
+  save: { loadSave, updateSave },
+  hud,
+  onCash: earnCash,
 });
 
 // Gold cash-pickup discs in the world, driven by the mission manager.
@@ -429,6 +527,16 @@ const hudSnapshot = {
   prompt: '',
   driving: false,
   aiming: false,
+  // Round 8: the weather label, whether it is night, the active side
+  // job (or null), and whether Leo is standing by the garage or the
+  // alley shop — the HUD reads these to draw its weather line and the
+  // side-job timer.
+  weatherName: 'Clear',
+  isNight: false,
+  sideActive: null,
+  sideStats: null,
+  garageNear: false,
+  arsenalNear: false,
 };
 
 const minimapData = {
@@ -488,6 +596,9 @@ let stealPressed = false;
 const GAME_KEYS = new Set([
   'KeyW', 'KeyA', 'KeyS', 'KeyD', 'ShiftLeft', 'ShiftRight', 'Space',
   'KeyE', 'KeyF', 'KeyR', 'KeyM', 'KeyP', 'Escape', 'Digit1', 'Digit2', 'Digit3',
+  // Round 8: garage (G), arsenal (B), taxi fare (T), courier run (C),
+  // and the three new weapons (4 SMG, 5 rifle, 6 bat).
+  'KeyG', 'KeyB', 'KeyT', 'KeyC', 'Digit4', 'Digit5', 'Digit6',
 ]);
 
 window.addEventListener('keydown', (event) => {
@@ -501,6 +612,16 @@ window.addEventListener('keydown', (event) => {
   if (event.code === 'Digit1' && state === 'playing') combat.equipWeapon('fists');
   if (event.code === 'Digit2' && state === 'playing') combat.equipWeapon('pistol');
   if (event.code === 'Digit3' && state === 'playing') combat.equipWeapon('shotgun');
+  // Round 8 weapons: the SMG and the rifle need to be bought at the
+  // alley arsenal first; the combat system refuses a weapon Leo does
+  // not own, so pressing 4 on a fresh save is a no-op, not a bug.
+  if (event.code === 'Digit4' && state === 'playing') combat.equipWeapon('smg');
+  if (event.code === 'Digit5' && state === 'playing') combat.equipWeapon('rifle');
+  if (event.code === 'Digit6' && state === 'playing') combat.equipWeapon('bat');
+  if (event.code === 'KeyG' && state === 'playing') toggleGarage();
+  if (event.code === 'KeyB' && state === 'playing') toggleArsenal();
+  if (event.code === 'KeyT' && state === 'playing') tryTaxiFare();
+  if (event.code === 'KeyC' && state === 'playing') tryCourierRun();
   if (event.code === 'KeyP') togglePhone();
   if (event.code === 'Escape') togglePause();
   audio.ensure();
@@ -596,6 +717,62 @@ function togglePhone() {
     showOverlay('phone-overlay');
   } else if (state === 'phone') {
     startPlaying();
+  }
+}
+
+// --- Round 8 shop and side-job toggles -------------------------------------
+// The garage and the arsenal are proximity shops: G and B only open them
+// when Leo is standing by the marker, and the prompt line (currentPrompt)
+// tells him so. The shops are overlays, not game states, so the city
+// keeps running behind them — Leo can be robbed while he shops, the
+// same as in life.
+function toggleGarage() {
+  if (garage.isOpen()) {
+    garage.setOpen(false);
+    return;
+  }
+  const pos = player.group.position;
+  if (garage.isNearGarage(pos)) {
+    garage.setOpen(true);
+    audio.click();
+  } else {
+    hud.toast('The garage is on the west side — drive to the marker there', 3);
+  }
+}
+
+function toggleArsenal() {
+  if (arsenal.isOpen()) {
+    arsenal.setOpen(false);
+    return;
+  }
+  const pos = player.group.position;
+  if (arsenal.isNearShop(pos)) {
+    arsenal.setOpen(true);
+    audio.click();
+  } else {
+    hud.toast('The arsenal is down the alley — find the fence there', 3);
+  }
+}
+
+function tryTaxiFare() {
+  const pos = player.group.position;
+  if (!player.inVehicle) {
+    hud.toast('Fares need wheels — get in a car first', 2);
+    return;
+  }
+  if (side.isNearTaxiStand(pos)) {
+    side.startTaxi(pos);
+  } else {
+    hud.toast('Taxi stand is at the plaza — drive there to pick up a fare', 3);
+  }
+}
+
+function tryCourierRun() {
+  const pos = player.group.position;
+  if (side.isNearCourierDepot(pos)) {
+    side.startCourier(pos);
+  } else {
+    hud.toast('Courier depot is at the garage — head there to pick up a parcel', 3);
   }
 }
 
@@ -719,7 +896,7 @@ const menuSaveNote = document.getElementById('menu-save-note');
 if (menuSaveNote) {
   if (hasSave() && (save.missionsCompleted.length > 0 || save.cash > 0)) {
     menuSaveNote.textContent =
-      `Save found: ${formatMoney(save.cash)}, ${save.missionsCompleted.length} of 7 missions done.`;
+      `Save found: ${formatMoney(save.cash)}, ${save.missionsCompleted.length} of 10 missions done.`;
   } else {
     menuSaveNote.textContent = 'No save yet — a fresh story starts with $120 in Leo’s pocket.';
   }
@@ -862,9 +1039,12 @@ function tryShoot() {
   camera.getWorldDirection(direction);
   const facing = new THREE.Vector3(-Math.sin(player.heading), 0, -Math.cos(player.heading));
   const targets = buildCombatTargets();
-  if (combat.getWeapon() === 'pistol') {
+  const weapon = combat.getWeapon();
+  if (weapon === 'pistol' || weapon === 'shotgun' || weapon === 'smg' || weapon === 'rifle') {
     combat.shoot(origin, direction, targets);
   } else {
+    // Fists and the bat are both melee: the combat system reads the
+    // current weapon's damage and range for the swing.
     combat.punch(origin, facing, targets);
   }
 }
@@ -960,10 +1140,20 @@ function updateDrivingCamera(dt) {
 }
 
 function currentPrompt() {
-  if (state !== 'playing' || player.inVehicle) return '';
+  if (state !== 'playing') return '';
   const pos = player.group.position;
+  // Driving: the only prompt that matters on the road is a fare waiting
+  // at the plaza. Everything else needs Leo on foot.
+  if (player.inVehicle) {
+    if (side.isNearTaxiStand(pos)) return '<b>T</b> Pick up a taxi fare at the plaza';
+    return '';
+  }
   const car = vehicles.nearestEnterableVehicle(pos, PLAYER.enterCarRange);
   if (car) return '<b>E</b> Enter car &nbsp;·&nbsp; <b>F</b> Steal it';
+  // Round 8 shops and depots, in the order a player walks past them.
+  if (garage.isNearGarage(pos)) return '<b>G</b> Garage — tune your ride';
+  if (arsenal.isNearShop(pos)) return '<b>B</b> Alley arsenal — buy weapons';
+  if (side.isNearCourierDepot(pos)) return '<b>C</b> Courier run — pick up a parcel';
   const objective = missions.getCurrentObjective();
   if (objective.missionId) {
     const marker = missions.getMarkerTarget();
@@ -1092,6 +1282,22 @@ function stepGame(dt) {
 
   world.update(dt, playSeconds);
 
+  // Round 8 systems, on the same clock as the HUD: the weather reads
+  // main's clock (one game minute every six real seconds) so the sun
+  // never disagrees with the clock, the grip it returns goes straight
+  // into the vehicle system, and the docks, garage, side jobs and
+  // arsenal all watch Leo's position every frame.
+  weather.update(dt, { hour, minute });
+  vehicles.setWeatherGrip(weather.getGripFactor());
+  district.update(dt, { night: weather.isNight() });
+  garage.update(dt, { playerPos: player.group.position });
+  side.update(dt, {
+    playerPos: player.group.position,
+    inVehicle: player.inVehicle,
+    speed: playerCar ? Math.abs(playerCar.speed) : 0,
+  });
+  arsenal.update(dt, { playerPos: player.group.position });
+
   // HUD + minimap + sound, from one snapshot.
   const objective = missions.getCurrentObjective();
   const ammo = combat.getAmmo();
@@ -1110,7 +1316,13 @@ function stepGame(dt) {
   hudSnapshot.objective = objective;
   hudSnapshot.prompt = currentPrompt();
   hudSnapshot.driving = player.inVehicle;
-  hudSnapshot.aiming = !player.inVehicle && (combat.getWeapon() === 'pistol' || combat.getWeapon() === 'shotgun');
+  hudSnapshot.aiming = !player.inVehicle && (combat.getWeapon() === 'pistol' || combat.getWeapon() === 'shotgun' || combat.getWeapon() === 'smg' || combat.getWeapon() === 'rifle');
+  hudSnapshot.weatherName = weather.getWeatherName();
+  hudSnapshot.isNight = weather.isNight();
+  hudSnapshot.sideActive = side.getActive();
+  hudSnapshot.sideStats = side.getState().stats;
+  hudSnapshot.garageNear = garage.isNearGarage(player.group.position);
+  hudSnapshot.arsenalNear = arsenal.isNearShop(player.group.position);
   hud.update(hudSnapshot, dt);
   fillMinimapTraffic();
   minimapData.playerX = player.group.position.x;
@@ -1224,6 +1436,14 @@ window.__solmar = {
   vehicles,
   police,
   missions,
+  // Round 8 systems, exposed for the headless playtests and the
+  // staged screenshots: weather, the docks, the garage, the side jobs
+  // and the arsenal all answer getState().
+  weather,
+  district,
+  garage,
+  side,
+  arsenal,
 };
 animate();
 
