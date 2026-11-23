@@ -11,14 +11,19 @@
 // The game itself: Leo Marlow, a driver-for-hire in the fictional coastal
 // city of Marisol Bay at golden hour. Drive and steal cars, dodge a 0-5
 // star wanted level and the patrols it brings, fight on foot with fists,
-// a pistol or a shotgun, and work seven story missions for the Marisol
-// crew — First Fare, The Pickup, Hot Wheels, Heat Wave, Midnight Run,
-// The Getaway and The Big Score — with a HUD, a round minimap, a sprint
+// a pistol, a shotgun, an SMG, a rifle or a bat, and work ten story
+// missions for the Marisol crew — First Fare, The Pickup, Hot Wheels,
+// Heat Wave, Midnight Run, The Getaway, The Big Score, Night Shift at the
+// Docks, Storm Run and The Broker — with a HUD, a round minimap, a sprint
 // stamina bar, synthesised sound, a start screen and a localStorage save
-// that now keeps three backup slots. Four deterministic screenshots live
-// in screenshots/ (the first by name is the cover), staged with
-// ?shot=<name>: cover, drive, chase and mission, each showing several
-// systems at once.
+// that now keeps three backup slots. Round 8 adds a full day and night
+// cycle with clear, overcast, rain, storm and fog weather that changes
+// the light and the grip, the North Docks container port with cranes and
+// yard hands, a garage that paints and tunes Leo's cars, taxi fares and
+// courier runs, three street races, ten hidden packages and an alley
+// arsenal. Four deterministic screenshots live in screenshots/ (the
+// first by name is the cover), staged with ?shot=<name>: cover, drive,
+// chase and mission, each showing several systems at once.
 //
 // Serve it locally with `node serve.ts`, then open http://localhost:8080.
 // Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for

@@ -4,7 +4,7 @@
 [![rank](https://make.fun/badge/gta6-01/kontoru29/gta6-01/rank.svg)](https://make.fun/bounty/gta6-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
 [![reward](https://make.fun/badge/gta6-01/kontoru29/gta6-01/reward.svg)](https://make.fun/bounty/gta6-01?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
 
-**Solmar Bay** is an open-world crime game in the spirit of GTA 6, built for make.fun's "Make GTA 6" bounty: a sun-soaked fictional coastal city, Marisol Bay, at golden hour. You are Leo Marlow, a driver-for-hire pulled into the Marisol crew. Explore the city on foot or behind the wheel, steal cars, dodge patrols, fight back when cornered, and work through seven story missions — from a first getaway fare to a bank job finale with the whole city on your tail.
+**Solmar Bay** is an open-world crime game in the spirit of GTA 6, built for make.fun's "Make GTA 6" bounty: a sun-soaked fictional coastal city, Marisol Bay, at golden hour. You are Leo Marlow, a driver-for-hire pulled into the Marisol crew. Explore the city on foot or behind the wheel, steal cars, dodge patrols, fight back when cornered, and work through ten story missions — from a first getaway fare to a bank job finale with the whole city on your tail, and on to night shifts at the docks.
 
 Everything is original: the city, the characters, the vehicles, the story, the art and the synthesised sound. No assets from any commercial game, no network requests — the whole game is static files under `game/`, with three.js vendored locally.
 
@@ -25,9 +25,14 @@ Then open http://localhost:8080 in desktop Chrome. Click **Continue** (or **New 
 | Space | Brake / handbrake |
 | E | Enter / exit a car |
 | F | Steal a nearby car |
-| Mouse + click | Aim / shoot (pistol, shotgun) or punch (fists) |
+| Mouse + click | Aim / shoot (pistol, shotgun, SMG, rifle) or punch (fists, bat) |
 | 1 / 2 / 3 | Fists / pistol / shotgun |
+| 4 / 5 / 6 | SMG / rifle / bat (buy them at the alley arsenal first) |
 | R | Reload |
+| G | Garage — paint and tuning, near the garage marker |
+| B | Alley arsenal — buy weapons and ammo |
+| T | Taxi fare — pick up a passenger at the plaza (while driving) |
+| C | Courier run — pick up a parcel at the garage |
 | P | Phone — mission list |
 | Esc | Pause |
 | M | Mute sound |
@@ -38,8 +43,13 @@ Then open http://localhost:8080 in desktop Chrome. Click **Continue** (or **New 
 - **Driving and traffic**: arcade driving with eleven body styles (sedan, hatch, coupe, sport, van, pickup, taxi, roadster, supercar, police and more) and bright paint jobs, parked cars to take, and traffic that follows the lanes, brakes and swerves around you, yields at intersections and leaves engine smoke when it is nearly wrecked.
 - **Pedestrians**: walkers on the sidewalks who stroll in pairs, check their phones, pause, and flee from gunshots and speeding cars.
 - **Wanted level and police**: crimes raise 0–5 stars; patrol cars and officers spawn scaled to the heat, chase and ram you, and can bust you on foot. At three stars they set roadblocks ahead of you, at four they try PIT spins, and at five a helicopter hovers over the chase with a searchlight and blocks the heat from cooling while it lives. Break line of sight and lie low to cool off.
-- **Combat**: fists up close, a hitscan pistol with tracer and muzzle flash and damage that falls off at range, and a six-pellet shotgun that hits hard up close. Ammo and reloads for each gun, plus a sprint stamina bar that drains while you run and refills while you ride.
-- **Seven story missions**: First Fare, The Pickup, Hot Wheels, Heat Wave, Midnight Run, The Getaway and The Big Score, with objectives, a glowing 3D marker, a minimap blip, crew dialogue and cash rewards — plus free-roam cash pickups, sunset photo spots, stunt jumps and paid car thefts between jobs.
+- **Combat**: fists up close, a hitscan pistol with tracer and muzzle flash and damage that falls off at range, a six-pellet shotgun that hits hard up close, an SMG that sprays close in, a long-range rifle, and a baseball bat for the quiet option. Ammo and reloads for each gun, plus a sprint stamina bar that drains while you run and refills while you ride.
+- **Ten story missions**: First Fare, The Pickup, Hot Wheels, Heat Wave, Midnight Run, The Getaway, The Big Score, Night Shift at the Docks, Storm Run and The Broker, with objectives, a glowing 3D marker, a minimap blip, crew dialogue and cash rewards — plus free-roam cash pickups, sunset photo spots, stunt jumps and paid car thefts between jobs.
+- **Day, night and weather**: a full day cycle with dawn, day, dusk and night, and five weather states — clear, overcast, rain, storm and fog — that change the light, the sky, the fog and how much grip the roads have. Rain and storms make chases slippery; dock lamps and crane lights burn after dark.
+- **The North Docks**: a working container port in the north-east corner — three rows of stacked shipping containers, two gantry cranes with swaying hooks, a rust-roofed warehouse, dock lamps, a fenced gate and yard hands walking their rounds. The new missions send Leo there after dark, and a smuggler's cache glows between the stacks.
+- **Garage and tuning**: paint the car in twelve colours, fit sport, muscle or off-road wheels, bolt on three engine stages and three armour stages. Upgrades belong to Leo, not to one car — whatever he is driving carries his setup.
+- **Side jobs**: taxi fares from the plaza (press T while driving), courier runs from the garage (press C), three street races with checkpoint rings and par times, and ten hidden packages stashed around the city.
+- **Alley arsenal**: a fence down the alley sells an SMG, a rifle and a baseball bat, plus ammo by the box. Bought weapons unlock on keys 4, 5 and 6 and stay bought in the save.
 - **HUD and minimap**: health, stamina, cash, wanted stars, mission objective, speed, weapon and ammo, a clock, and a round top-down minimap showing roads, traffic, police blips, the helicopter, photo spots and the mission marker.
 - **Sound, all synthesised**: engine hum that follows your speed, a two-tone siren, a helicopter rotor, gunshots and a shotgun blast, pickup blips, a mission jingle and a slow ambient pad loop. No audio files.
 - **Start screen, pause, phone menu and save**: continue a saved story or start fresh.
@@ -52,6 +62,10 @@ Four deterministic shots, staged with `?shot=<name>&seed=1` and captured in head
 2. `2-drive.jpg` — driving through traffic at 1 wanted star.
 3. `3-chase.jpg` — a three-star police chase with patrol cars fanned out behind Leo.
 4. `4-mission.jpg` — a job in progress on foot, pistol drawn, two stars, an officer closing in.
+
+### Round 8 — weather, the docks, and a city that pays
+
+Round 7 was rejected on a transcript check, so this round is a genuine revision pass under a fresh recording: a full day and night cycle with five weather states that change the light and the grip, the North Docks container port with cranes, a warehouse and yard hands, three new story missions (Night Shift at the Docks, Storm Run, The Broker), a garage with paint, wheels, engine and armour tuning, taxi fares, courier runs, three street races, ten hidden packages, and an alley arsenal selling an SMG, a rifle and a bat. The four shots are restaged on top of it, captured fresh in this recording.
 
 ### Round 7 — more city, more crew, more heat
 
@@ -71,7 +85,7 @@ The fifth submitted round scored 0.988731 in development but slid to rank 458 of
 - `game/src/pedestrians.js` — sidewalk walkers who flee from danger.
 - `game/src/police.js` — wanted level, pursuit, roadblocks, PIT, helicopter.
 - `game/src/combat.js` — fists, pistol and shotgun, hitscan, ammo, crime reporting.
-- `game/src/missions.js` — seven story missions, objectives, cash pickups.
+- `game/src/missions.js` — ten story missions, objectives, cash pickups.
 - `game/src/hud.js` — HUD readouts and the 2D minimap.
 - `game/src/audio.js` — WebAudio synth: engine, siren, rotor, shots, music.
 - `game/src/shots.js` — deterministic `?shot=` staging for screenshots.
