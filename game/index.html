@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="Solmar Bay — an open-world crime game in Marisol Bay: drive, steal cars, dodge patrols and work seven story missions.">
+<meta name="description" content="Solmar Bay — an open-world crime game in Marisol Bay: drive, steal cars, dodge patrols and work ten story missions.">
 <title>Solmar Bay — A Marisol Bay Story</title>
 <style>
   :root {
@@ -37,6 +37,12 @@
     text-shadow: 0 0 10px rgba(255, 180, 40, 0.7), 0 2px 6px rgba(0,0,0,0.6); min-height: 32px; }
   #hud-wanted .star-off { color: rgba(255,255,255,0.28); text-shadow: none; }
   #hud-clock { font-size: 15px; font-weight: 700; color: #dfe9f2; }
+  /* Round 8: the weather line sits under the clock (Clear, Overcast,
+     Rain, Storm, Fog, plus a Night tag), and the active side-job line
+     sits under the objective with its countdown. */
+  #hud-weather { font-size: 14px; font-weight: 700; color: #9fd8cb; }
+  #hud-side { font-size: 13px; font-weight: 700; color: var(--gold); margin-top: 5px; }
+  #hud-side:empty { display: none; }
 
   #hud-bottom-left { position: absolute; left: 14px; bottom: 14px; width: 250px; }
   #hud-health-label { font-size: 11px; font-weight: 700; letter-spacing: 2px; color: #cfe0d8; }
@@ -162,11 +168,13 @@
     <div id="hud-objective-text">Explore Marisol Bay — or open the phone (P) to start a mission.</div>
     <div id="hud-objective-step"></div>
     <div id="hud-objective-dialogue"></div>
+    <div id="hud-side"></div>
   </div>
   <div id="hud-top-right">
     <div id="hud-cash">$120</div>
     <div id="hud-wanted" title="Wanted level"></div>
     <div id="hud-clock" class="hud-panel">17:40</div>
+    <div id="hud-weather" class="hud-panel">Clear</div>
   </div>
   <div id="hud-bottom-left">
     <div id="hud-health-label">HEALTH</div>
@@ -195,8 +203,9 @@
       instead the Marisol crew handed him a getaway car, a package, and a city full of
       patrol cars. Drive it, steal it, lose the heat, and pull off the big score.</p>
     <p>Explore the city on foot or behind the wheel. Steal cars, dodge patrols, fight
-      back when cornered, and work through seven story missions for the crew. Your cash
-      and mission progress save automatically.</p>
+      back when cornered, and work through ten story missions for the crew — plus taxi
+      fares, courier runs, street races and a garage that tunes whatever you drive.
+      Your cash and mission progress save automatically.</p>
     <div class="controls-grid">
       <div><b>W A S D</b> Move / drive</div>
       <div><b>Shift</b> Run (uses stamina)</div>
@@ -205,7 +214,12 @@
       <div><b>F</b> Steal car / interact</div>
       <div><b>Mouse + Click</b> Aim / shoot</div>
       <div><b>1 / 2 / 3</b> Fists / pistol / shotgun</div>
+      <div><b>4 / 5 / 6</b> SMG / rifle / bat</div>
       <div><b>R</b> Reload</div>
+      <div><b>G</b> Garage (near the marker)</div>
+      <div><b>B</b> Alley arsenal</div>
+      <div><b>T</b> Taxi fare (at the plaza)</div>
+      <div><b>C</b> Courier run (at the garage)</div>
       <div><b>P</b> Phone (missions)</div>
       <div><b>Esc</b> Pause</div>
       <div><b>M</b> Mute sound</div>
