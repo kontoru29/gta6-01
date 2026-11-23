@@ -1,12 +1,18 @@
-// audio.js — Solmar Bay synthesised sound, no audio files at all.
+// audio.js — Solmar Bay synthesised sound, no audio files at all, rebuilt.
 //
 // Every sound is built live with the Web Audio API: a low engine hum that
-// rises with speed, a two-tone police siren, a sharp gunshot crack, a soft
-// pickup blip, a mission-complete jingle, and a slow golden-hour pad loop
-// for ambient music. Nothing here loads a file, touches the network, or
-// decides game logic — main.js just calls these methods when things happen.
-// The context is created lazily on the first user gesture, so browsers that
-// block autoplay never throw; every method is safe to call before that.
+// rises with speed, a two-tone police siren, a sharp gunshot crack, a deep
+// shotgun blast, a soft pickup blip, a mission-complete jingle, and a slow
+// golden-hour pad loop for ambient music. Nothing here loads a file,
+// touches the network, or decides game logic — main.js just calls these
+// methods when things happen. The context is created lazily on the first
+// user gesture, so browsers that block autoplay never throw; every method
+// is safe to call before that.
+//
+// New this round: a helicopter rotor loop that thumps in once the wanted
+// level hits five stars and stops when the heat clears, and a shotgun
+// blast — a deeper, longer noise burst than the pistol crack — for the
+// new weapon.
 
 const NOTE_FREQ = {
   C3: 130.81, D3: 146.83, E3: 164.81, F3: 174.61, G3: 196.0, A3: 220.0,
@@ -27,6 +33,7 @@ export class AudioEngine {
     this.ctx = null;
     this.master = null;
     this.muted = false;
+    this.volume = 0.55; // master volume, 0..1; mute restores to this
     this.engineOsc = null;
     this.engineGain = null;
     this.engineFilter = null;
@@ -34,6 +41,9 @@ export class AudioEngine {
     this.sirenGain = null;
     this.sirenTimer = null;
     this.sirenHigh = false;
+    this.rotorOsc = null;
+    this.rotorGain = null;
+    this.rotorLfo = null;
     this.padTimer = null;
     this.padChordIndex = 0;
     this.noiseBuffer = null;
@@ -71,9 +81,20 @@ export class AudioEngine {
   setMuted(muted) {
     this.muted = Boolean(muted);
     if (this.master && this.ctx) {
-      this.master.gain.setTargetAtTime(this.muted ? 0 : 0.55, this.ctx.currentTime, 0.05);
+      this.master.gain.setTargetAtTime(this.muted ? 0 : this.volume, this.ctx.currentTime, 0.05);
     }
     return this.muted;
+  }
+
+  // Master volume, 0..1. Clamped, stored so mute can restore it, and
+  // applied to the master gain the same way mute does.
+  setMasterVolume(level) {
+    const volume = Math.max(0, Math.min(1, Number(level) || 0));
+    this.volume = volume;
+    if (this.master && this.ctx) {
+      this.master.gain.setTargetAtTime(this.muted ? 0 : volume, this.ctx.currentTime, 0.05);
+    }
+    return volume;
   }
 
   isMuted() {
@@ -152,6 +173,48 @@ export class AudioEngine {
     }
   }
 
+  // --- helicopter rotor: a low thump loop, only at five stars. A 55 Hz
+  // square wave through a low-pass, chopped by a slow LFO so it thumps
+  // instead of droning. Started and stopped from update().
+  setRotor(active) {
+    if (!this.ctx) return;
+    if (active && !this.rotorOsc) {
+      this.rotorOsc = this.ctx.createOscillator();
+      this.rotorOsc.type = 'square';
+      this.rotorOsc.frequency.value = 55;
+      const filter = this.ctx.createBiquadFilter();
+      filter.type = 'lowpass';
+      filter.frequency.value = 220;
+      this.rotorGain = this.ctx.createGain();
+      this.rotorGain.gain.value = 0.0;
+      this.rotorLfo = this.ctx.createOscillator();
+      this.rotorLfo.type = 'sine';
+      this.rotorLfo.frequency.value = 11;
+      const lfoGain = this.ctx.createGain();
+      lfoGain.gain.value = 0.03;
+      this.rotorLfo.connect(lfoGain);
+      lfoGain.connect(this.rotorGain.gain);
+      this.rotorOsc.connect(filter);
+      filter.connect(this.rotorGain);
+      this.rotorGain.connect(this.master);
+      this.rotorOsc.start();
+      this.rotorLfo.start();
+      this.rotorGain.gain.setTargetAtTime(0.045, this.ctx.currentTime, 0.4);
+    } else if (!active && this.rotorOsc) {
+      const osc = this.rotorOsc;
+      const lfo = this.rotorLfo;
+      const gain = this.rotorGain;
+      this.rotorOsc = null;
+      this.rotorLfo = null;
+      this.rotorGain = null;
+      gain.gain.setTargetAtTime(0, this.ctx.currentTime, 0.1);
+      window.setTimeout(() => {
+        try { osc.stop(); } catch { /* already stopped */ }
+        try { lfo.stop(); } catch { /* already stopped */ }
+      }, 300);
+    }
+  }
+
   // --- one-shot helpers ---------------------------------------------------
   blip(freq, dur, type, vol, when) {
     if (!this.ctx || !this.master) return;
@@ -191,6 +254,13 @@ export class AudioEngine {
   shot() {
     this.noiseBurst(0.14, 0.5, 3200);
     this.blip(160, 0.09, 'square', 0.12);
+  }
+
+  // The shotgun: a longer, deeper blast than the pistol crack.
+  shotgun() {
+    this.noiseBurst(0.28, 0.65, 1400);
+    this.blip(90, 0.16, 'square', 0.2);
+    this.blip(60, 0.22, 'sine', 0.18, 0.03);
   }
 
   punch() {
@@ -275,16 +345,19 @@ export class AudioEngine {
     }
   }
 
-  // Call once per frame from the game loop; keeps the engine hum honest.
+  // Call once per frame from the game loop; keeps the engine hum honest,
+  // the siren on while wanted, and the rotor thumping at five stars.
   update(speed01, driving, wanted) {
     if (!this.ctx) return;
     this.setEngine(speed01, driving);
     this.setSiren(wanted > 0);
+    this.setRotor(wanted >= 5);
   }
 
   dispose() {
     this.stopMusic();
     this.setSiren(false);
+    this.setRotor(false);
     if (this.ctx) {
       this.ctx.close().catch(() => {});
       this.ctx = null;

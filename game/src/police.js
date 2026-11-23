@@ -1,4 +1,4 @@
-// police.js — the Marisol Bay police: wanted level, pursuit, arrest.
+// police.js — the Marisol Bay police, rebuilt for Round 7.
 //
 // One system owns everything about the law. Crimes feed a heat number
 // (0-100); every 20 heat is one wanted star, up to five. The star count
@@ -6,10 +6,21 @@
 // Leo: more stars means more units, faster cars and less patience.
 // Motorbikes join from two stars — quicker and nimbler than the patrol
 // cars, they cut through traffic to stay on Leo's tail, and on foot a
-// rider can grab him just like an officer. Heat cools only while Leo is
-// out of sight for a while, so a chase ends by breaking line of sight
-// and staying away. Officers on foot can arrest Leo (busted); a wrecked
-// car or zero health ends the run (wasted).
+// rider can grab him just like an officer.
+//
+// New this round: at three stars the force sets roadblocks — patrol cars
+// park across the road ahead of Leo instead of chasing. At four stars a
+// patrol car alongside Leo's car will PIT him, a hard shove into the
+// rear quarter that spins the car. At five stars a helicopter joins the
+// hunt: it hovers above Leo, its searchlight pinning him, and as long as
+// it is overhead Leo can never be hidden, so the heat never cools.
+// Patrol cars now steer along the roads instead of cutting across
+// blocks, so a chase reads as a pursuit down real streets.
+//
+// Heat cools only while Leo is out of sight for a while, so a chase ends
+// by breaking line of sight and staying away. Officers on foot can
+// arrest Leo (busted); a wrecked car or zero health ends the run
+// (wasted).
 //
 // The system is created once by main.js and driven every frame through
 // update(dt, context). It never touches the HUD, the missions or the save
@@ -50,6 +61,10 @@ const OFFICERS_PER_STAR = [0, 0, 1, 1, 2, 3];
 // Police motorbikes join the chase from two stars: quicker and nimbler
 // than the patrol cars, they cut through traffic to stay on Leo's tail.
 const BIKES_PER_STAR = [0, 0, 1, 1, 2, 2];
+// Roadblock cars, parked across the road ahead of Leo, from three stars.
+const ROADBLOCK_CARS_PER_STAR = [0, 0, 0, 1, 2, 2];
+// The helicopter joins at five stars and never leaves while it is wanted.
+const HELIS_PER_STAR = [0, 0, 0, 0, 0, 1];
 
 // Heat only starts falling this long after the last crime, and only while
 // Leo is hidden from every unit.
@@ -69,6 +84,15 @@ const ARREST_HOLD = 1.0; // seconds inside the range before the bust lands
 const RAM_RANGE = 5.0; // a patrol car this close rams the player's car
 const RAM_HIT = 9; // car health lost per ram
 const RAM_PAUSE = 1.6; // seconds between rams from the same car
+// A PIT: at four stars, a patrol car alongside the player's car shoves
+// its rear quarter. Harder than a ram, and it spins the car.
+const PIT_RANGE = 4.2;
+const PIT_HIT = 16;
+const PIT_PAUSE = 4.0;
+
+// The roadblock: cars park this far ahead of Leo, across his road.
+const ROADBLOCK_AHEAD = 45;
+const ROADBLOCK_ARRIVE = 6;
 
 // Unit bodies.
 const OFFICER_SPEED = 5.4; // metres per second on foot
@@ -81,6 +105,10 @@ const CAR_TURN_RATE = 2.4; // radians per second of steering
 const BIKE_TOP_SPEED = 33;
 const BIKE_TURN_RATE = 3.6;
 const BIKE_TOUGHNESS = 60;
+// The helicopter: hovers high, follows Leo, never lands.
+const HELI_TOUGHNESS = 200;
+const HELI_HEIGHT = 42;
+const HELI_FOLLOW_SPEED = 24;
 
 // Fallbacks used when the caller hands us no road network at all.
 const FALLBACK_ROAD_GAP = 40;
@@ -92,7 +120,7 @@ let nextUnitId = 1;
 // Pure helpers. Nothing here knows about the game.
 // ---------------------------------------------------------------------------
 
-function clampValue(value, low, high) {
+function clampNum(value, low, high) {
   return value < low ? low : value > high ? high : value;
 }
 
@@ -104,7 +132,7 @@ function dist2d(ax, az, bx, bz) {
 
 // Move `angle` toward `target` by at most `step` radians, the short way
 // around the circle.
-function turnToward(angle, target, step) {
+function steerToward(angle, target, step) {
   let diff = target - angle;
   while (diff > Math.PI) diff -= Math.PI * 2;
   while (diff < -Math.PI) diff += Math.PI * 2;
@@ -114,7 +142,7 @@ function turnToward(angle, target, step) {
 }
 
 // A random point on a ring around (cx, cz), using the caller's rng.
-function ringSpot(rng, cx, cz, near, far) {
+function ringPoint(rng, cx, cz, near, far) {
   const angle = rng() * Math.PI * 2;
   const radius = near + rng() * (far - near);
   return { x: cx + Math.sin(angle) * radius, z: cz + Math.cos(angle) * radius };
@@ -122,7 +150,7 @@ function ringSpot(rng, cx, cz, near, far) {
 
 // Snap a point onto the fallback road grid (streets every FALLBACK_ROAD_GAP
 // metres, crossing at the origin) when no real road network is available.
-function snapToGrid(point) {
+function snapToFallbackGrid(point) {
   const gap = FALLBACK_ROAD_GAP;
   if (Math.abs(point.z % gap) < Math.abs(point.x % gap)) {
     return { x: point.x, z: Math.round(point.z / gap) * gap };
@@ -130,8 +158,8 @@ function snapToGrid(point) {
   return { x: Math.round(point.x / gap) * gap, z: point.z };
 }
 
-// Small box-mesh helper shared by the three mesh factories.
-function boxMesh(material, w, h, d, x, y, z, parent) {
+// Small box-mesh helper shared by the mesh factories.
+function putBox(material, w, h, d, x, y, z, parent) {
   const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), material);
   mesh.position.set(x, y, z);
   if (parent) parent.add(mesh);
@@ -139,27 +167,28 @@ function boxMesh(material, w, h, d, x, y, z, parent) {
 }
 
 // ---------------------------------------------------------------------------
-// Mesh factories: what a patrol car, an officer and a police bike look like.
+// Mesh factories: what a patrol car, an officer, a police bike and the
+// helicopter look like.
 // ---------------------------------------------------------------------------
 
 // A black-and-white patrol car: dark body, pale doors, a roof light bar
 // whose red and blue halves flash while the car is chasing. The materials
 // for the two halves are returned so update() can flash them.
-function makePatrolCarMesh() {
+function buildPatrolCar() {
   const group = new THREE.Group();
   const paint = new THREE.MeshStandardMaterial({ color: 0x14181f, metalness: 0.55, roughness: 0.4 });
   const doorPaint = new THREE.MeshStandardMaterial({ color: 0xf2f0e8, metalness: 0.3, roughness: 0.5 });
   const glass = new THREE.MeshStandardMaterial({ color: 0x1b2a33, metalness: 0.8, roughness: 0.15 });
   const tyre = new THREE.MeshStandardMaterial({ color: 0x0c0c0c, roughness: 0.9 });
 
-  const body = boxMesh(paint, 2.0, 0.62, 4.3, 0, 0.55, 0, group);
+  const body = putBox(paint, 2.0, 0.62, 4.3, 0, 0.55, 0, group);
   body.castShadow = true;
-  const cabin = boxMesh(glass, 1.7, 0.55, 2.2, 0, 1.12, -0.2, group);
+  const cabin = putBox(glass, 1.7, 0.55, 2.2, 0, 1.12, -0.2, group);
   cabin.castShadow = true;
 
   // Pale doors on both flanks, so the car reads as a patrol car from the side.
   for (const side of [-1, 1]) {
-    boxMesh(doorPaint, 0.06, 0.5, 1.7, side * 1.01, 0.62, 0.1, group);
+    putBox(doorPaint, 0.06, 0.5, 1.7, side * 1.01, 0.62, 0.1, group);
   }
 
   const redLamp = new THREE.MeshStandardMaterial({
@@ -168,9 +197,9 @@ function makePatrolCarMesh() {
   const blueLamp = new THREE.MeshStandardMaterial({
     color: 0x1122aa, emissive: 0x2244ff, emissiveIntensity: 0.2,
   });
-  boxMesh(tyre, 1.3, 0.12, 0.4, 0, 1.46, -0.2, group);
-  boxMesh(redLamp, 0.55, 0.14, 0.34, -0.32, 1.56, -0.2, group);
-  boxMesh(blueLamp, 0.55, 0.14, 0.34, 0.32, 1.56, -0.2, group);
+  putBox(tyre, 1.3, 0.12, 0.4, 0, 1.46, -0.2, group);
+  putBox(redLamp, 0.55, 0.14, 0.34, -0.32, 1.56, -0.2, group);
+  putBox(blueLamp, 0.55, 0.14, 0.34, 0.32, 1.56, -0.2, group);
 
   const wheelGeo = new THREE.CylinderGeometry(0.36, 0.36, 0.28, 14);
   for (const [wx, wz] of [[-0.95, 1.4], [0.95, 1.4], [-0.95, -1.4], [0.95, -1.4]]) {
@@ -186,16 +215,16 @@ function makePatrolCarMesh() {
 
 // An officer on foot: navy uniform, cap, pale shirt front. Small on purpose
 // — officers are read at a distance by the navy block and the cap.
-function makeOfficerMesh() {
+function buildOfficer() {
   const group = new THREE.Group();
   const uniform = new THREE.MeshStandardMaterial({ color: 0x1c2f55, roughness: 0.75 });
   const shirt = new THREE.MeshStandardMaterial({ color: 0xe8e4d8, roughness: 0.8 });
   const skin = new THREE.MeshStandardMaterial({ color: 0xc98d64, roughness: 0.7 });
   const capMat = new THREE.MeshStandardMaterial({ color: 0x101c33, roughness: 0.6 });
 
-  const torso = boxMesh(uniform, 0.55, 0.72, 0.32, 0, 1.08, 0, group);
+  const torso = putBox(uniform, 0.55, 0.72, 0.32, 0, 1.08, 0, group);
   torso.castShadow = true;
-  boxMesh(shirt, 0.3, 0.5, 0.05, 0, 1.1, 0.18, group);
+  putBox(shirt, 0.3, 0.5, 0.05, 0, 1.1, 0.18, group);
 
   const head = new THREE.Mesh(new THREE.SphereGeometry(0.21, 12, 10), skin);
   head.position.y = 1.62;
@@ -205,12 +234,12 @@ function makeOfficerMesh() {
   const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.23, 0.24, 0.1, 12), capMat);
   cap.position.y = 1.78;
   group.add(cap);
-  boxMesh(capMat, 0.34, 0.03, 0.22, 0, 1.74, 0.2, group);
+  putBox(capMat, 0.34, 0.03, 0.22, 0, 1.74, 0.2, group);
 
   for (const side of [-1, 1]) {
-    const leg = boxMesh(uniform, 0.2, 0.72, 0.22, side * 0.15, 0.36, 0, group);
+    const leg = putBox(uniform, 0.2, 0.72, 0.22, side * 0.15, 0.36, 0, group);
     leg.castShadow = true;
-    boxMesh(uniform, 0.14, 0.62, 0.16, side * 0.36, 1.05, 0, group);
+    putBox(uniform, 0.14, 0.62, 0.16, side * 0.36, 1.05, 0, group);
   }
 
   return group;
@@ -223,7 +252,7 @@ function makeOfficerMesh() {
 // Police heading convention: 0 faces +Z, so a left turn (heading growing)
 // leans the bike toward +X — the lean group rolls the other way round
 // from the traffic bikes in vehicles.js, which face -Z.
-function makePoliceBikeMesh() {
+function buildPoliceBike() {
   const group = new THREE.Group();
   const leanGroup = new THREE.Group();
   group.add(leanGroup);
@@ -246,13 +275,13 @@ function makePoliceBikeMesh() {
     wheel.castShadow = true;
     leanGroup.add(wheel);
   }
-  boxMesh(dark, 0.09, 0.09, 1.35, 0, 0.62, 0, leanGroup);
-  boxMesh(paint, 0.34, 0.22, 0.5, 0, 0.78, 0.08, leanGroup);
-  boxMesh(dark, 0.3, 0.1, 0.45, 0, 0.8, -0.38, leanGroup);
-  boxMesh(chrome, 0.56, 0.06, 0.06, 0, 0.95, 0.55, leanGroup);
+  putBox(dark, 0.09, 0.09, 1.35, 0, 0.62, 0, leanGroup);
+  putBox(paint, 0.34, 0.22, 0.5, 0, 0.78, 0.08, leanGroup);
+  putBox(dark, 0.3, 0.1, 0.45, 0, 0.8, -0.38, leanGroup);
+  putBox(chrome, 0.56, 0.06, 0.06, 0, 0.95, 0.55, leanGroup);
 
   // The rider: navy uniform, white helmet, leaning forward over the tank.
-  const torso = boxMesh(uniform, 0.42, 0.55, 0.26, 0, 1.15, -0.08, leanGroup);
+  const torso = putBox(uniform, 0.42, 0.55, 0.26, 0, 1.15, -0.08, leanGroup);
   torso.rotation.x = -0.5;
   const head = new THREE.Mesh(new THREE.SphereGeometry(0.16, 12, 10), skin);
   head.position.set(0, 1.5, 0.14);
@@ -263,9 +292,9 @@ function makePoliceBikeMesh() {
   helmet.castShadow = true;
   leanGroup.add(helmet);
   for (const side of [-1, 1]) {
-    const arm = boxMesh(uniform, 0.11, 0.5, 0.12, side * 0.24, 1.28, 0.3, leanGroup);
+    const arm = putBox(uniform, 0.11, 0.5, 0.12, side * 0.24, 1.28, 0.3, leanGroup);
     arm.rotation.x = 0.9;
-    const leg = boxMesh(uniform, 0.14, 0.5, 0.14, side * 0.2, 0.72, -0.18, leanGroup);
+    const leg = putBox(uniform, 0.14, 0.5, 0.14, side * 0.2, 0.72, -0.18, leanGroup);
     leg.rotation.x = -0.35;
   }
 
@@ -277,11 +306,66 @@ function makePoliceBikeMesh() {
   const blueLamp = new THREE.MeshStandardMaterial({
     color: 0x1122aa, emissive: 0x2244ff, emissiveIntensity: 0.2,
   });
-  boxMesh(dark, 0.5, 0.08, 0.3, 0, 0.95, -0.55, leanGroup);
-  boxMesh(redLamp, 0.2, 0.12, 0.22, -0.13, 1.04, -0.55, leanGroup);
-  boxMesh(blueLamp, 0.2, 0.12, 0.22, 0.13, 1.04, -0.55, leanGroup);
+  putBox(dark, 0.5, 0.08, 0.3, 0, 0.95, -0.55, leanGroup);
+  putBox(redLamp, 0.2, 0.12, 0.22, -0.13, 1.04, -0.55, leanGroup);
+  putBox(blueLamp, 0.2, 0.12, 0.22, 0.13, 1.04, -0.55, leanGroup);
 
   return { group, leanGroup, redLamp, blueLamp };
+}
+
+// The helicopter: a navy body with a glass nose, a tail boom, a spinning
+// main rotor and a pale searchlight cone underneath. The rotor group and
+// the searchlight material are returned so update() can spin the rotor
+// and pulse the light.
+function buildHelicopter() {
+  const group = new THREE.Group();
+  const paint = new THREE.MeshStandardMaterial({ color: 0x1c2f55, metalness: 0.5, roughness: 0.45 });
+  const glass = new THREE.MeshStandardMaterial({ color: 0x1b2a33, metalness: 0.8, roughness: 0.15 });
+  const dark = new THREE.MeshStandardMaterial({ color: 0x14181f, metalness: 0.5, roughness: 0.5 });
+
+  const body = putBox(paint, 2.2, 1.6, 4.2, 0, 0, 0, group);
+  body.castShadow = true;
+  putBox(glass, 1.8, 1.0, 1.0, 0, 0.2, 2.0, group);
+  putBox(dark, 0.5, 0.5, 3.4, 0, 0.1, -3.4, group);
+  putBox(paint, 0.3, 1.2, 0.8, 0, 0.8, -4.8, group);
+
+  const rotor = new THREE.Group();
+  rotor.position.set(0, 1.1, 0);
+  const bladeGeo = new THREE.BoxGeometry(7.2, 0.08, 0.4);
+  const bladeMat = new THREE.MeshStandardMaterial({ color: 0x22262e, metalness: 0.6, roughness: 0.4 });
+  const bladeA = new THREE.Mesh(bladeGeo, bladeMat);
+  bladeA.castShadow = true;
+  rotor.add(bladeA);
+  const bladeB = new THREE.Mesh(bladeGeo, bladeMat);
+  bladeB.rotation.y = Math.PI / 2;
+  bladeB.castShadow = true;
+  rotor.add(bladeB);
+  group.add(rotor);
+
+  // Searchlight cone: a translucent cone pointing straight down.
+  const lightMat = new THREE.MeshBasicMaterial({
+    color: 0xfff2c0, transparent: true, opacity: 0.12,
+    side: THREE.DoubleSide, depthWrite: false,
+  });
+  const cone = new THREE.Mesh(new THREE.ConeGeometry(6, 40, 16, 1, true), lightMat);
+  cone.position.set(0, -20.5, 0);
+  cone.rotation.x = Math.PI;
+  group.add(cone);
+
+  // Red and blue lamps on the skids, flashing with the rest of the force.
+  const redLamp = new THREE.MeshStandardMaterial({
+    color: 0xaa1111, emissive: 0xff2020, emissiveIntensity: 0.2,
+  });
+  const blueLamp = new THREE.MeshStandardMaterial({
+    color: 0x1122aa, emissive: 0x2244ff, emissiveIntensity: 0.2,
+  });
+  putBox(redLamp, 0.4, 0.2, 0.4, -0.8, -0.9, 1.2, group);
+  putBox(blueLamp, 0.4, 0.2, 0.4, 0.8, -0.9, 1.2, group);
+  // Skids.
+  putBox(dark, 0.12, 0.12, 3.4, -0.9, -1.0, 0, group);
+  putBox(dark, 0.12, 0.12, 3.4, 0.9, -1.0, 0, group);
+
+  return { group, rotor, lightMat, redLamp, blueLamp };
 }
 
 // ---------------------------------------------------------------------------
@@ -291,7 +375,7 @@ function makePoliceBikeMesh() {
 
 // The factory main.js calls. Options:
 // { scene, policeStation, onWantedChanged(level), onBusted(), onWasted(reason),
-//   onRam(amount), random }
+//   onRam(amount, kind), random }
 export function createPoliceSystem(options = {}) {
   const scene = options.scene || null;
   const station = options.policeStation || { x: 0, z: 0 };
@@ -307,6 +391,7 @@ export function createPoliceSystem(options = {}) {
   let lastCrimeAt = -Infinity;
   let lastSeenAt = -Infinity;
   let ended = false;
+  let lastPlayerPos = null;
   const units = [];
   // Reused per-frame scratch: update() returns the same events object
   // every frame, and getBlips() refills the same blip list, so the hot
@@ -333,27 +418,39 @@ export function createPoliceSystem(options = {}) {
       lean: 0,
       arrestTimer: 0,
       lastRamAt: -Infinity,
+      lastPitAt: -Infinity,
+      roadblockTarget: null,
       lamps: lamps || null,
     };
   }
 
-  // Build one unit object (car, bike or officer) and put its mesh in the scene.
+  // Build one unit object (car, bike, officer or heli) and put its mesh in
+  // the scene.
   function buildUnit(kind, spot) {
     if (kind === 'officer') {
-      const group = makeOfficerMesh();
+      const group = buildOfficer();
       group.position.set(spot.x, 0, spot.z);
       if (scene) scene.add(group);
       return baseUnit('officer', group, OFFICER_TOUGHNESS, null);
     }
     if (kind === 'bike') {
-      const built = makePoliceBikeMesh();
+      const built = buildPoliceBike();
       built.group.position.set(spot.x, 0, spot.z);
       if (scene) scene.add(built.group);
       const unit = baseUnit('bike', built.group, BIKE_TOUGHNESS, { red: built.redLamp, blue: built.blueLamp });
       unit.leanGroup = built.leanGroup;
       return unit;
     }
-    const built = makePatrolCarMesh();
+    if (kind === 'heli') {
+      const built = buildHelicopter();
+      built.group.position.set(spot.x, HELI_HEIGHT, spot.z);
+      if (scene) scene.add(built.group);
+      const unit = baseUnit('heli', built.group, HELI_TOUGHNESS, { red: built.redLamp, blue: built.blueLamp });
+      unit.rotor = built.rotor;
+      unit.lightMat = built.lightMat;
+      return unit;
+    }
+    const built = buildPatrolCar();
     built.group.position.set(spot.x, 0, spot.z);
     if (scene) scene.add(built.group);
     return baseUnit('car', built.group, PATROL_TOUGHNESS, { red: built.redLamp, blue: built.blueLamp });
@@ -370,40 +467,64 @@ export function createPoliceSystem(options = {}) {
   // to a road when the caller gave us a road network.
   function pickSpawnSpot(playerPos, roads) {
     for (let attempt = 0; attempt < 8; attempt += 1) {
-      const ring = ringSpot(rng, playerPos.x, playerPos.z, SPAWN_NEAR, SPAWN_FAR);
+      const ring = ringPoint(rng, playerPos.x, playerPos.z, SPAWN_NEAR, SPAWN_FAR);
       let spot = ring;
       if (roads && typeof roads.randomRoadPointNear === 'function') {
         const roadSpot = roads.randomRoadPointNear(playerPos, SPAWN_NEAR, SPAWN_FAR);
         if (roadSpot) spot = roadSpot;
       } else if (roads && typeof roads.nearestRoadPoint === 'function') {
-        const roadSpot = roads.nearestRoadPoint(ring);
+        const roadSpot = roads.nearestRoadPoint(ring.x, ring.z);
         if (roadSpot) spot = roadSpot;
       } else {
-        spot = snapToGrid(ring);
+        spot = snapToFallbackGrid(ring);
       }
-      spot.x = clampValue(spot.x, -CITY_EDGE, CITY_EDGE);
-      spot.z = clampValue(spot.z, -CITY_EDGE, CITY_EDGE);
+      spot.x = clampNum(spot.x, -CITY_EDGE, CITY_EDGE);
+      spot.z = clampNum(spot.z, -CITY_EDGE, CITY_EDGE);
       if (dist2d(spot.x, spot.z, playerPos.x, playerPos.z) >= SPAWN_NEAR) return spot;
     }
     return { x: playerPos.x + SPAWN_NEAR, z: playerPos.z };
   }
 
+  // A roadblock spot: ahead of the player along the road they are on.
+  // The caller passes the player's position and heading; the spot is a
+  // point on the nearest road, some distance ahead of them.
+  function pickRoadblockSpot(playerPos, playerHeading, roads) {
+    let ahead = {
+      x: playerPos.x + Math.sin(playerHeading) * ROADBLOCK_AHEAD,
+      z: playerPos.z + Math.cos(playerHeading) * ROADBLOCK_AHEAD,
+    };
+    if (roads && typeof roads.nearestRoadPoint === 'function') {
+      const snapped = roads.nearestRoadPoint(ahead.x, ahead.z);
+      if (snapped) ahead = snapped;
+    }
+    ahead.x = clampNum(ahead.x, -CITY_EDGE, CITY_EDGE);
+    ahead.z = clampNum(ahead.z, -CITY_EDGE, CITY_EDGE);
+    return ahead;
+  }
+
   // Grow or shrink the force until it matches the current star count.
-  // Counts in one pass and removes surplus farthest-first, one at a
-  // time — no temporary arrays, so this stays cheap every frame.
+  // Counts in one pass and removes surplus farthest-first — no temporary
+  // arrays, so this stays cheap every frame. Roadblock cars and the heli
+  // are counted separately from the chasing patrol cars.
   function syncForce(playerPos, roads) {
-    const anchor = playerPos || station;
+    const anchor = playerPos || lastPlayerPos || station;
     const wantCars = PATROL_CARS_PER_STAR[stars] || 0;
     const wantOfficers = OFFICERS_PER_STAR[stars] || 0;
     const wantBikes = BIKES_PER_STAR[stars] || 0;
+    const wantRoadblocks = ROADBLOCK_CARS_PER_STAR[stars] || 0;
+    const wantHelis = HELIS_PER_STAR[stars] || 0;
     let cars = 0;
     let officers = 0;
     let bikes = 0;
+    let roadblocks = 0;
+    let helis = 0;
     for (const unit of units) {
       if (!unit.alive) continue;
-      if (unit.kind === 'car') cars += 1;
+      if (unit.kind === 'car' && unit.mode === 'roadblock') roadblocks += 1;
+      else if (unit.kind === 'car') cars += 1;
       else if (unit.kind === 'officer') officers += 1;
       else if (unit.kind === 'bike') bikes += 1;
+      else if (unit.kind === 'heli') helis += 1;
     }
     for (let i = cars; i < wantCars; i += 1) {
       units.push(buildUnit('car', pickSpawnSpot(anchor, roads)));
@@ -414,17 +535,35 @@ export function createPoliceSystem(options = {}) {
     for (let i = bikes; i < wantBikes; i += 1) {
       units.push(buildUnit('bike', pickSpawnSpot(anchor, roads)));
     }
+    for (let i = roadblocks; i < wantRoadblocks; i += 1) {
+      const heading = lastPlayerPos && typeof lastPlayerPos.heading === 'number'
+        ? lastPlayerPos.heading
+        : 0;
+      const car = buildUnit('car', pickSpawnSpot(anchor, roads));
+      car.mode = 'roadblock';
+      car.roadblockTarget = pickRoadblockSpot(anchor, heading, roads);
+      units.push(car);
+    }
+    for (let i = helis; i < wantHelis; i += 1) {
+      const heli = buildUnit('heli', { x: anchor.x, z: anchor.z - 40 });
+      units.push(heli);
+    }
     // Too many: stand down the farthest ones first.
-    const removeFarthest = (kind, want) => {
+    const removeFarthest = (kind, want, mode) => {
       let count = 0;
       for (const unit of units) {
-        if (unit.alive && unit.kind === kind) count += 1;
+        if (!unit.alive || unit.kind !== kind) continue;
+        if (mode && unit.mode !== mode) continue;
+        if (!mode && unit.mode === 'roadblock') continue;
+        count += 1;
       }
       while (count > want) {
         let farthest = null;
         let farDist = -1;
         for (const unit of units) {
           if (!unit.alive || unit.kind !== kind) continue;
+          if (mode && unit.mode !== mode) continue;
+          if (!mode && unit.mode === 'roadblock') continue;
           const d = dist2d(unit.group.position.x, unit.group.position.z, anchor.x, anchor.z);
           if (d > farDist) {
             farDist = d;
@@ -437,9 +576,11 @@ export function createPoliceSystem(options = {}) {
         count -= 1;
       }
     };
-    removeFarthest('car', wantCars);
-    removeFarthest('officer', wantOfficers);
-    removeFarthest('bike', wantBikes);
+    removeFarthest('car', wantCars, null);
+    removeFarthest('car', wantRoadblocks, 'roadblock');
+    removeFarthest('officer', wantOfficers, null);
+    removeFarthest('bike', wantBikes, null);
+    removeFarthest('heli', wantHelis, null);
   }
 
   // Tell the game the star count moved, and resize the force to match it.
@@ -447,21 +588,68 @@ export function createPoliceSystem(options = {}) {
     const wanted = starsForHeatValue(heat);
     if (wanted === stars) return;
     stars = wanted;
-    syncForce();
+    syncForce(lastPlayerPos, null);
     if (onWantedChanged) onWantedChanged(stars);
   }
 
   // --- one unit, one frame ---------------------------------------------------
 
-  // One patrol car, one frame: steer at the target, close in, ram on contact.
-  function stepPatrolCar(unit, dt, playerPos, playerCarPos, playerInCar) {
+  // One patrol car, one frame: steer at the target, close in, ram on
+  // contact. Cars steer along the roads when a road network is given:
+  // a car that has been knocked off-road aims for the nearest road point
+  // first, so a chase reads as a pursuit down real streets instead of a
+  // straight cut across the blocks.
+  function stepPatrolCar(unit, dt, playerPos, playerCarPos, playerInCar, playerHeading, roads) {
+    // A roadblock car drives to its assigned spot ahead of Leo, then
+    // parks across the road and waits. If Leo goes far away, the block
+    // re-targets to a fresh spot ahead of him.
+    if (unit.mode === 'roadblock') {
+      const target = unit.roadblockTarget || playerPos;
+      const dx = target.x - unit.group.position.x;
+      const dz = target.z - unit.group.position.z;
+      const distance = Math.sqrt(dx * dx + dz * dz);
+      if (distance < ROADBLOCK_ARRIVE) {
+        unit.speed = Math.max(0, unit.speed - 20 * dt);
+        if (unit.speed <= 0.1) {
+          unit.speed = 0;
+          unit.group.position.x = target.x;
+          unit.group.position.z = target.z;
+        }
+        return;
+      }
+      const wantedHeading = Math.atan2(dx, dz);
+      unit.heading = steerToward(unit.heading, wantedHeading, CAR_TURN_RATE * dt);
+      unit.speed += (CAR_TOP_SPEED * 0.8 - unit.speed) * Math.min(1, dt * 2.5);
+      unit.group.position.x += Math.sin(unit.heading) * unit.speed * dt;
+      unit.group.position.z += Math.cos(unit.heading) * unit.speed * dt;
+      unit.group.rotation.y = unit.heading;
+      if (playerPos && dist2d(target.x, target.z, playerPos.x, playerPos.z) > 120) {
+        unit.roadblockTarget = pickRoadblockSpot(playerPos, playerHeading || 0, roads);
+      }
+      return;
+    }
+
     const target = playerInCar && playerCarPos ? playerCarPos : playerPos;
     const dx = target.x - unit.group.position.x;
     const dz = target.z - unit.group.position.z;
     const distance = Math.sqrt(dx * dx + dz * dz);
     if (distance < 0.01) return;
-    const wantedHeading = Math.atan2(dx, dz);
-    unit.heading = turnToward(unit.heading, wantedHeading, CAR_TURN_RATE * dt);
+
+    // Road-aware steering: off-road cars aim for the nearest road first.
+    let aimX = target.x;
+    let aimZ = target.z;
+    if (roads && typeof roads.nearestRoadPoint === 'function') {
+      const roadPoint = roads.nearestRoadPoint(unit.group.position.x, unit.group.position.z);
+      if (roadPoint) {
+        const offRoad = dist2d(unit.group.position.x, unit.group.position.z, roadPoint.x, roadPoint.z);
+        if (offRoad > 14) {
+          aimX = roadPoint.x;
+          aimZ = roadPoint.z;
+        }
+      }
+    }
+    const wantedHeading = Math.atan2(aimX - unit.group.position.x, aimZ - unit.group.position.z);
+    unit.heading = steerToward(unit.heading, wantedHeading, CAR_TURN_RATE * dt);
     const cruise = Math.min(CAR_TOP_SPEED, 12 + stars * 2.5);
     const desiredSpeed = distance > 10 ? cruise : cruise * 0.55;
     unit.speed += (desiredSpeed - unit.speed) * Math.min(1, dt * 2.5);
@@ -477,7 +665,24 @@ export function createPoliceSystem(options = {}) {
         // Shove the patrol car back a touch so it does not glue itself on.
         unit.group.position.x -= Math.sin(unit.heading) * 1.2;
         unit.group.position.z -= Math.cos(unit.heading) * 1.2;
-        if (onRam) onRam(RAM_HIT);
+        if (onRam) onRam(RAM_HIT, 'ram');
+      }
+    }
+
+    // PIT: at four stars, a patrol car alongside the player's car shoves
+    // its rear quarter. Harder than a ram, and the spin is the point.
+    if (stars >= 4 && playerInCar && playerCarPos && typeof playerHeading === 'number') {
+      const fwdX = Math.sin(playerHeading);
+      const fwdZ = Math.cos(playerHeading);
+      const ox = unit.group.position.x - playerCarPos.x;
+      const oz = unit.group.position.z - playerCarPos.z;
+      const along = ox * fwdX + oz * fwdZ;
+      const side = Math.abs(ox * -fwdZ + oz * fwdX);
+      if (along > -2 && along < 4 && side < PIT_RANGE && clock - unit.lastPitAt > PIT_PAUSE) {
+        unit.lastPitAt = clock;
+        unit.group.position.x -= Math.sin(unit.heading) * 1.6;
+        unit.group.position.z -= Math.cos(unit.heading) * 1.6;
+        if (onRam) onRam(PIT_HIT, 'pit');
       }
     }
   }
@@ -493,7 +698,7 @@ export function createPoliceSystem(options = {}) {
     if (distance < 0.01) return false;
     const wantedHeading = Math.atan2(dx, dz);
     const beforeHeading = unit.heading;
-    unit.heading = turnToward(unit.heading, wantedHeading, BIKE_TURN_RATE * dt);
+    unit.heading = steerToward(unit.heading, wantedHeading, BIKE_TURN_RATE * dt);
     const cruise = Math.min(BIKE_TOP_SPEED, 14 + stars * 3);
     const desiredSpeed = distance > 12 ? cruise : cruise * 0.6;
     unit.speed += (desiredSpeed - unit.speed) * Math.min(1, dt * 3);
@@ -506,7 +711,7 @@ export function createPoliceSystem(options = {}) {
     // left turn and the bike banks toward +X: the lean group rolls the
     // opposite way from the traffic bikes, which face -Z.
     const turnRate = (unit.heading - beforeHeading) / Math.max(dt, 0.001);
-    const leanTarget = clampValue(turnRate * -0.12, -0.5, 0.5);
+    const leanTarget = clampNum(turnRate * -0.12, -0.5, 0.5);
     unit.lean = (unit.lean || 0) + (leanTarget - (unit.lean || 0)) * Math.min(1, dt * 8);
     if (unit.leanGroup) unit.leanGroup.rotation.z = unit.lean;
 
@@ -531,7 +736,7 @@ export function createPoliceSystem(options = {}) {
     const distance = Math.sqrt(dx * dx + dz * dz);
     if (distance > 0.01) {
       const wantedHeading = Math.atan2(dx, dz);
-      unit.heading = turnToward(unit.heading, wantedHeading, 5.0 * dt);
+      unit.heading = steerToward(unit.heading, wantedHeading, 5.0 * dt);
       unit.group.position.x += Math.sin(unit.heading) * OFFICER_SPEED * dt;
       unit.group.position.z += Math.cos(unit.heading) * OFFICER_SPEED * dt;
       unit.group.rotation.y = unit.heading;
@@ -544,6 +749,29 @@ export function createPoliceSystem(options = {}) {
       unit.arrestTimer = 0;
     }
     return false;
+  }
+
+  // One helicopter, one frame: close on Leo from above, hover over him,
+  // spin the rotor and sweep the searchlight. The heli never lands and
+  // never arrests — it watches, and while it watches Leo is never hidden.
+  function stepHeli(unit, dt, playerPos) {
+    const dx = playerPos.x - unit.group.position.x;
+    const dz = playerPos.z - unit.group.position.z;
+    const distance = Math.sqrt(dx * dx + dz * dz);
+    if (distance > 0.01) {
+      const wantedHeading = Math.atan2(dx, dz);
+      unit.heading = steerToward(unit.heading, wantedHeading, 1.2 * dt);
+      const follow = Math.min(HELI_FOLLOW_SPEED, distance * 0.6);
+      unit.speed += (follow - unit.speed) * Math.min(1, dt * 1.5);
+      unit.group.position.x += Math.sin(unit.heading) * unit.speed * dt;
+      unit.group.position.z += Math.cos(unit.heading) * unit.speed * dt;
+    }
+    // Hover with a slow bob, rotor spinning, searchlight pulsing.
+    unit.group.position.y = HELI_HEIGHT + Math.sin(clock * 0.7) * 1.5;
+    unit.group.rotation.y = unit.heading;
+    if (unit.rotor) unit.rotor.rotation.y = clock * 14;
+    if (unit.lightMat) unit.lightMat.opacity = 0.09 + 0.05 * Math.sin(clock * 3);
+    unit.mode = 'chasing';
   }
 
   // Alternate the red and blue halves of every light bar. A bike's pod
@@ -597,7 +825,11 @@ export function createPoliceSystem(options = {}) {
     const playerHealth = typeof ctx.playerHealth === 'number' ? ctx.playerHealth : 100;
     const playerCarHealth = typeof ctx.playerCarHealth === 'number' ? ctx.playerCarHealth : null;
     const playerCarPos = ctx.playerCarPosition || null;
+    const playerHeading = typeof ctx.playerCarHeading === 'number'
+      ? ctx.playerCarHeading
+      : (typeof ctx.playerHeading === 'number' ? ctx.playerHeading : 0);
     const roads = ctx.roadNetwork || null;
+    lastPlayerPos = { x: playerPos.x, z: playerPos.z, heading: playerHeading };
 
     // Wasted: Leo is down, or his car is a wreck.
     if (playerHealth <= 0) {
@@ -614,13 +846,20 @@ export function createPoliceSystem(options = {}) {
     }
 
     // How close is the nearest unit? That decides hiding and giving up.
+    // A live helicopter overhead means Leo is never hidden: the
+    // searchlight pins him, so the heat never cools while it is up.
     let nearest = Infinity;
+    let heliWatching = false;
     for (const unit of units) {
       if (!unit.alive) continue;
+      if (unit.kind === 'heli') {
+        heliWatching = true;
+        continue;
+      }
       const d = dist2d(unit.group.position.x, unit.group.position.z, playerPos.x, playerPos.z);
       if (d < nearest) nearest = d;
     }
-    const hidden = nearest > HIDDEN_RANGE || units.length === 0;
+    const hidden = (nearest > HIDDEN_RANGE || units.length === 0) && !heliWatching;
     if (!hidden) lastSeenAt = clock;
 
     // Heat cools only after the grace period, and only while hidden.
@@ -637,9 +876,11 @@ export function createPoliceSystem(options = {}) {
       if (!unit.alive) continue;
       let caught = false;
       if (unit.kind === 'car') {
-        stepPatrolCar(unit, step, playerPos, playerCarPos, playerInCar);
+        stepPatrolCar(unit, step, playerPos, playerCarPos, playerInCar, playerHeading, roads);
       } else if (unit.kind === 'bike') {
         caught = stepBike(unit, step, playerPos, playerInCar);
+      } else if (unit.kind === 'heli') {
+        stepHeli(unit, step, playerPos);
       } else {
         caught = stepOfficer(unit, step, playerPos, playerInCar);
       }
@@ -677,6 +918,11 @@ export function createPoliceSystem(options = {}) {
     getHeat() { return heat; },
     isWanted() { return stars > 0; },
     getUnits() { return units.filter((unit) => unit.alive); },
+    // Live units of one kind only ('car', 'bike', 'officer' or 'heli'):
+    // the chase shot's check that the helicopter is really overhead.
+    getUnitsByKind(kind) {
+      return units.filter((unit) => unit.alive && unit.kind === kind);
+    },
     // Minimap blips, refilled in place every call: the same array and
     // the same blip objects come back, so the per-frame minimap read
     // never allocates.
@@ -704,7 +950,7 @@ export function createPoliceSystem(options = {}) {
       const heatGain = Object.prototype.hasOwnProperty.call(CRIME_HEAT, type)
         ? CRIME_HEAT[type]
         : 10;
-      heat = clampValue(heat + heatGain, 0, MAX_HEAT);
+      heat = clampNum(heat + heatGain, 0, MAX_HEAT);
       lastCrimeAt = clock;
       const before = stars;
       publishStars();
@@ -717,7 +963,7 @@ export function createPoliceSystem(options = {}) {
       };
     },
     setWantedLevel(level) {
-      const wanted = clampValue(Math.round(level) || 0, 0, MAX_WANTED);
+      const wanted = clampNum(Math.round(level) || 0, 0, MAX_WANTED);
       const before = stars;
       heat = wanted * HEAT_PER_STAR;
       lastCrimeAt = clock;
@@ -725,7 +971,7 @@ export function createPoliceSystem(options = {}) {
       return { stars, heat, changed: stars !== before };
     },
     addHeat(amount) {
-      heat = clampValue(heat + (amount || 0), 0, MAX_HEAT);
+      heat = clampNum(heat + (amount || 0), 0, MAX_HEAT);
       publishStars();
       return stars;
     },
@@ -737,7 +983,9 @@ export function createPoliceSystem(options = {}) {
     removeUnit,
     // Force one unit to appear at an exact spot (shot staging uses this).
     spawnAt(position, kind) {
-      const wantedKind = kind === 'officer' ? 'officer' : kind === 'bike' ? 'bike' : 'car';
+      const wantedKind = kind === 'officer' ? 'officer'
+        : kind === 'bike' ? 'bike'
+        : kind === 'heli' ? 'heli' : 'car';
       const spot = {
         x: position && typeof position.x === 'number' ? position.x : 0,
         z: position && typeof position.z === 'number' ? position.z : 0,
@@ -747,6 +995,7 @@ export function createPoliceSystem(options = {}) {
       return unit;
     },
     pickSpawnSpot,
+    pickRoadblockSpot,
     syncForce,
     damageUnit,
 
@@ -754,6 +1003,7 @@ export function createPoliceSystem(options = {}) {
     stepPatrolCar,
     stepBike,
     stepOfficer,
+    stepHeli,
     flashSirens,
     standDownAll,
 
@@ -778,5 +1028,5 @@ export function createPoliceSystem(options = {}) {
 // own heat number instead of asking this module.
 export function starsForHeatValue(value) {
   if (value <= 0) return 0;
-  return clampValue(Math.floor(value / HEAT_PER_STAR), 0, MAX_WANTED);
+  return clampNum(Math.floor(value / HEAT_PER_STAR), 0, MAX_WANTED);
 }

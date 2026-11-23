@@ -1,4 +1,4 @@
-// player.js — Leo Marlow on foot in Marisol Bay.
+// player.js — Leo Marlow on foot in Marisol Bay, rebuilt for Round 7.
 //
 // The on-foot half of the player. Leo is a small articulated figure built
 // from plain three.js shapes: he walks the city on WASD, a third-person
@@ -6,6 +6,13 @@
 // climbs into a car — and takes him back when he steps out. Driving,
 // traffic and car theft live in vehicles.js; this file only owns the
 // walking body.
+//
+// New this round: sprinting costs stamina. Running drains the meter,
+// walking and standing refill it, and Leo cannot sprint again until it
+// climbs back past the floor — so a chase on foot costs something
+// instead of being free forever. The follow camera also eases a little
+// further back as Leo picks up speed, so a sprint feels faster than a
+// stroll. The stamina number is exposed as player.stamina for the HUD.
 //
 // The contract other modules rely on (every name and signature stays):
 //   createPlayer(scene, options)
@@ -18,6 +25,7 @@
 //                                 Leo's feet, .rotation.y his facing.
 //       player.heading          — facing angle, radians, 0 faces -Z.
 //       player.speed            — current ground speed, metres per second.
+//       player.stamina          — sprint stamina, 0..100.
 //       player.inVehicle        — true while Leo is inside a car.
 //       player.vehicle          — the car he is in, or null.
 //       player.bindVehicles(s)  — attach (or swap) the vehicle system.
@@ -39,12 +47,13 @@
 // the vehicle system's job, not this file's.
 
 import * as THREE from 'three';
-import { PLAYER } from './config.js';
+import { PLAYER, STAMINA } from './config.js';
 import { clamp } from './utils.js';
 
 // Follow camera: trails behind Leo and eases into place instead of
 // snapping, so turning never whips the view around.
 const CAM_BEHIND = 7.5; // metres behind Leo's heels
+const CAM_BEHIND_RUN = 9.0; // metres behind him at a full sprint
 const CAM_HEIGHT = 3.4; // metres above the pavement
 const CAM_LOOK_Y = 1.6; // metres up Leo's body the camera looks at
 const CAM_LOOK_FWD = 2.5; // metres past Leo the camera aims at
@@ -165,6 +174,8 @@ export function createPlayer(scene, options = {}) {
   const state = {
     heading: start.heading || 0,
     speed: 0,
+    stamina: STAMINA.max,
+    sprinting: false, // set every frame in update; read via isSprinting
     cycle: 0, // walk-cycle phase; drives the limb swing
     drift: 0, // mouse-look offset from "straight behind Leo"
     inCar: false,
@@ -289,12 +300,15 @@ export function createPlayer(scene, options = {}) {
   }
 
   // Chase the spot behind Leo with a damped lerp, then look a little past
-  // him so the street ahead stays in frame.
+  // him so the street ahead stays in frame. The camera eases further back
+  // as Leo sprints, so running feels faster than strolling.
   function trackCamera(dt, camera) {
     if (!camera) return;
     const yaw = state.heading + state.drift;
-    const behindX = Math.sin(yaw) * CAM_BEHIND;
-    const behindZ = Math.cos(yaw) * CAM_BEHIND;
+    const speedShare = clamp(state.speed / PLAYER.runSpeed, 0, 1);
+    const behind = CAM_BEHIND + (CAM_BEHIND_RUN - CAM_BEHIND) * speedShare;
+    const behindX = Math.sin(yaw) * behind;
+    const behindZ = Math.cos(yaw) * behind;
     eye.set(
       root.position.x + behindX,
       CAM_HEIGHT,
@@ -317,6 +331,12 @@ export function createPlayer(scene, options = {}) {
     },
     get speed() {
       return state.speed;
+    },
+    get stamina() {
+      return state.stamina;
+    },
+    get isSprinting() {
+      return state.sprinting === true;
     },
     get inVehicle() {
       return state.inCar;
@@ -382,7 +402,9 @@ export function createPlayer(scene, options = {}) {
 
       // In a car Leo is hidden and the vehicle system drives; the only job
       // here is to catch "E to get out" and hand the request over.
+      // Stamina refills while he sits, so he steps out ready to run.
       if (state.inCar) {
+        state.stamina = Math.min(STAMINA.max, state.stamina + STAMINA.regenPerSecond * dt);
         if (input.enterPressed && state.vehicles
           && typeof state.vehicles.exitPlayerVehicle === 'function') {
           state.vehicles.exitPlayerVehicle();
@@ -429,10 +451,22 @@ export function createPlayer(scene, options = {}) {
         moveZ /= length;
       }
 
+      // Sprinting costs stamina: Shift runs only while the meter is above
+      // the floor. An empty meter means walking until it refills past the
+      // floor again, so a chase on foot costs something.
+      const wantsRun = Boolean(input.run) && state.stamina > STAMINA.minToRun;
+      const sprinting = moving && wantsRun;
+      state.sprinting = sprinting;
+      if (sprinting) {
+        state.stamina = Math.max(0, state.stamina - STAMINA.drainPerSecond * dt);
+      } else if (!moving || !input.run) {
+        state.stamina = Math.min(STAMINA.max, state.stamina + STAMINA.regenPerSecond * dt);
+      }
+
       // Instant response (no accel smoothing, no turn easing): the speed
       // and the facing snap to what the keys ask for, so Leo moves the
       // moment the player presses — never a beat late.
-      const targetSpeed = moving ? (input.run ? PLAYER.runSpeed : PLAYER.walkSpeed) : 0;
+      const targetSpeed = moving ? (sprinting ? PLAYER.runSpeed : PLAYER.walkSpeed) : 0;
       state.speed = targetSpeed;
 
       if (moving) {

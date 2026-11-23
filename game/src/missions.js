@@ -1,13 +1,22 @@
-// Solmar Bay — story missions, objectives and free-roam activities (missions.js)
+// missions.js — story missions, objectives and free-roam activities, rebuilt.
 //
-// This module owns the mission layer of the game: the five story missions of
-// Leo Marlow and the Marisol crew, the step-by-step objective shown on the
-// HUD, the glowing 3D marker in the world, the blip the minimap follows, and
-// the free-roam ways to earn cash between missions (scattered cash pickups,
-// stunt jumps and stealing cars). It does not draw the HUD or the minimap
-// itself — it hands main.js and hud.js the current objective text and the
-// marker position, and main.js calls update() every frame with where the
-// player is and what they are doing.
+// This module owns the mission layer of Solmar Bay: the seven story
+// missions of Leo Marlow and the Marisol crew, the step-by-step objective
+// shown on the HUD, the glowing 3D marker in the world, the blip the
+// minimap follows, and the free-roam ways to earn cash between missions
+// (scattered cash pickups, stunt jumps, sunset photo spots and stealing
+// cars). It does not draw the HUD or the minimap itself — it hands main.js
+// and hud.js the current objective text and the marker position, and
+// main.js calls update() every frame with where the player is and what
+// they are doing.
+//
+// Two new missions join the story this round: Midnight Run, a timed
+// drive from the pier to the hideout, and The Getaway, a showroom theft
+// with a clock ticking on the delivery. Two new step kinds support them:
+// 'timedDrive' (reach a marker before the clock runs out) and 'carryTo'
+// (grab something, then carry it to a second marker). Sunset photo spots
+// are the new free-roam earner: hold still at a scenic point and the
+// shot pays out.
 //
 // Public interface:
 //   createMissionManager(deps) -> manager
@@ -19,7 +28,7 @@
 //       onEvent  : function (event) called for every mission/cash event
 //       onCash   : function (amount, reason) called when cash is earned
 //     manager:
-//       definitions            : the five mission definitions (read-only data)
+//       definitions            : the seven mission definitions (read-only data)
 //       getMissionList()       -> [{ id, title, status, reward, ... }] for menus
 //       getActiveMission()     -> the active definition or null
 //       getCurrentObjective()  -> { title, text, step, steps } for the HUD
@@ -29,6 +38,7 @@
 //       retryMission(id)       -> restarts a failed mission from step one
 //       update(dt, ctx)        -> advances timers/markers, returns events []
 //       getCashPickups()       -> live pickup list for rendering / HUD
+//       getPhotoSpots()        -> live photo spot list for rendering / HUD
 //       collectNearbyPickups(pos) -> cash collected near a position (also in update)
 //       registerStuntJump(name, speed) -> cash award when a jump is landed
 //       registerCarStolen(carId, modelName) -> cash award, once per car
@@ -48,18 +58,20 @@
 //     { type: 'warning', text }               e.g. patrols closing in
 //     { type: 'pickup', amount, x, z }
 //     { type: 'stunt', amount, jumpName }
+//     { type: 'photo', amount, spotName }
 //     { type: 'carStolen', amount, carId }
 //
 // Coordinate convention: the city is a flat ground plane, y = 0. Markers are
-// named points { x, z } in metres, roughly inside -420..420 on both axes.
-// When deps.city is missing, the built-in DEFAULT_POINTS table below is used,
-// so missions still work in a bare scene (shots, tests, early integration).
+// named points { x, z } in metres, inside -250..250 on both axes. When
+// deps.city is missing, the built-in DEFAULT_POINTS table below is used, so
+// missions still work in a bare scene (shots, tests, early integration).
 //
 // Story (all original): Leo Marlow, a driver-for-hire in Marisol Bay, is
 // pulled into the Marisol crew — Mara Solano (the boss), Rico (wheelman),
 // June Park (lookout / hacker) and Theo (the kid who watches the streets).
 
 import * as THREE from 'three';
+import { FREE_ROAM } from './config.js';
 
 /** How close the player (or their car) must be to count as "arrived". */
 const ARRIVE_RADIUS = 6;
@@ -67,31 +79,42 @@ const ARRIVE_RADIUS = 6;
 const GRAB_RADIUS = 3.5;
 /** Seconds the player must stand still-ish inside a grab zone to finish it. */
 const GRAB_HOLD_SECONDS = 2.5;
+/** How close the player must stand to a photo spot to frame the shot. */
+const PHOTO_RADIUS = 4;
+/** Seconds of holding still at a photo spot before the shot pays out. */
+const PHOTO_HOLD_SECONDS = FREE_ROAM.photoHoldSeconds;
+/** A photo spot pays again this long after the last payout. */
+const PHOTO_COOLDOWN_SECONDS = FREE_ROAM.photoCooldownSeconds;
 /** A patrol counts as "too close" inside this distance, in metres. */
 const PATROL_SPOT_RADIUS = 28;
 /** Cash pickups come back this long after being collected. */
-const PICKUP_RESPAWN_SECONDS = 120;
+const PICKUP_RESPAWN_SECONDS = FREE_ROAM.pickupRespawnSeconds;
 /** A jump only pays when the car is moving at least this fast (m/s). */
-const STUNT_MIN_SPEED = 24;
+const STUNT_MIN_SPEED = FREE_ROAM.stuntMinSpeed;
 /** Stealing the same car twice never pays twice. */
-const CAR_THEFT_REWARD = 100;
+const CAR_THEFT_REWARD = FREE_ROAM.carTheftReward;
 
 /** Fallback world points, used when no city module is wired in yet. */
 export const DEFAULT_POINTS = {
-  garage: { x: -180, z: 140 },
-  pier: { x: 260, z: -300 },
-  alley: { x: -60, z: -180 },
-  plaza: { x: 40, z: 60 },
-  marina: { x: 300, z: 180 },
-  chopShop: { x: -300, z: -260 },
-  bank: { x: 120, z: -120 },
-  safehouse: { x: -240, z: 240 },
-  rooftop: { x: 180, z: 40 },
-  beach: { x: 60, z: -340 },
-  jumpNorth: { x: 0, z: -320 },
-  jumpSouth: { x: -40, z: 320 },
-  jumpEast: { x: 320, z: -40 },
-  jumpWest: { x: -320, z: 80 },
+  garage: { x: -120, z: -120 },
+  pier: { x: -260, z: 60 },
+  alley: { x: -60, z: -60 },
+  plaza: { x: 30, z: 30 },
+  marina: { x: 180, z: -60 },
+  showroom: { x: 180, z: -60 },
+  chopShop: { x: 180, z: 180 },
+  bank: { x: 60, z: -180 },
+  safehouse: { x: -180, z: 120 },
+  hideout: { x: -180, z: 120 },
+  rooftop: { x: 120, z: -180 },
+  beach: { x: -250, z: 0 },
+  dropoff: { x: 120, z: 60 },
+  jumpNorth: { x: 0, z: -215 },
+  jumpSouth: { x: 0, z: 215 },
+  jumpEast: { x: 215, z: 0 },
+  jumpWest: { x: -215, z: 0 },
+  jumpBeach: { x: -250, z: 60 },
+  jumpMarina: { x: 180, z: 60 },
 };
 
 /** Where the scattered free-roam cash pickups sit, and what each is worth.
@@ -107,23 +130,37 @@ const CASH_PICKUP_SPOTS = [
   { point: 'pier', amount: 90, dx: -14, dz: -6 },
   { point: 'garage', amount: 50, dx: 8, dz: 14 },
   { point: 'safehouse', amount: 80, dx: -8, dz: -12 },
+  { point: 'showroom', amount: 110, dx: -10, dz: 10 },
+  { point: 'dropoff', amount: 65, dx: 12, dz: -10 },
 ];
 
-/** The four stunt jumps: a name, a world point and the cash they pay. */
+/** The six stunt jumps: a name, a world point and the cash they pay. */
 const STUNT_JUMPS = [
   { name: 'North Bridge Leap', point: 'jumpNorth', reward: 150 },
   { name: 'South Dune Jump', point: 'jumpSouth', reward: 150 },
   { name: 'East Pier Hop', point: 'jumpEast', reward: 200 },
   { name: 'West Hill Launch', point: 'jumpWest', reward: 200 },
+  { name: 'Beach Dune Leap', point: 'jumpBeach', reward: 175 },
+  { name: 'Marina Ramp', point: 'jumpMarina', reward: 175 },
+];
+
+/** Sunset photo spots: hold still in the marker and the shot pays out. */
+const PHOTO_SPOTS = [
+  { name: 'Sunset Pier', point: 'pier', reward: 120, dx: 6, dz: -8 },
+  { name: 'Ferris Wheel Glow', point: 'jumpNorth', reward: 150, dx: -10, dz: 6 },
+  { name: 'Plaza Fountain', point: 'plaza', reward: 80, dx: -12, dz: -10 },
+  { name: 'Beach Golden Hour', point: 'beach', reward: 100, dx: 10, dz: -12 },
 ];
 
 /**
- * The five story missions. A step is one small job:
- *   kind 'driveTo'  — reach a marker while driving a car
- *   kind 'goTo'     — reach a marker on foot or in a car
- *   kind 'walkTo'   — reach a marker on foot (getting out matters)
- *   kind 'grab'     — stand in a small zone to pick something up
- *   kind 'stealCar' — take the marked car (main.js reports the steal)
+ * The seven story missions. A step is one small job:
+ *   kind 'driveTo'    — reach a marker while driving a car
+ *   kind 'timedDrive' — reach a marker while driving, before the clock ends
+ *   kind 'goTo'       — reach a marker on foot or in a car
+ *   kind 'walkTo'     — reach a marker on foot (getting out matters)
+ *   kind 'grab'       — stand in a small zone to pick something up
+ *   kind 'carryTo'    — grab at `point`, then carry it to `dest`
+ *   kind 'stealCar'   — take the marked car (main.js reports the steal)
  *   kind 'deliverCar' — bring the stolen car to a marker
  *   kind 'loseWanted' — get the wanted level back to zero
  *   kind 'reachSafe'  — reach the safehouse to finish the escape
@@ -167,9 +204,10 @@ export const MISSION_DEFINITIONS = [
     steps: [
       {
         id: 'fetch-package',
-        kind: 'grab',
+        kind: 'carryTo',
         point: 'alley',
-        text: 'Collect the package in the alley (stand in the marker)',
+        dest: 'plaza',
+        text: 'Collect the package in the alley, then carry it to the plaza',
         dialogue: 'June: "Brown bag, under the blue awning. Grab it and walk away."',
       },
       {
@@ -231,6 +269,66 @@ export const MISSION_DEFINITIONS = [
         timeLimit: 180,
         text: 'Lose the 3-star wanted level (reach 0 stars)',
         dialogue: 'June: "They are sweeping the avenues. Alleyways, Leo. Alleyways."',
+      },
+    ],
+  },
+  {
+    id: 'midnight-run',
+    title: 'Midnight Run',
+    reward: 550,
+    briefing:
+      'June: "A courier is waiting at the pier with a package the crew ' +
+      'needs at the hideout before midnight. Drive it there fast — the ' +
+      'clock is already running, and the streets are not empty."',
+    steps: [
+      {
+        id: 'meet-courier',
+        kind: 'goTo',
+        point: 'pier',
+        text: 'Meet the courier at the pier',
+        dialogue: 'June: "He is by the pier lights, grey jacket. Do not keep him waiting."',
+      },
+      {
+        id: 'race-hideout',
+        kind: 'timedDrive',
+        point: 'hideout',
+        timeLimit: 75,
+        text: 'Race the package to the hideout before the clock runs out',
+        dialogue: 'Mara: "Seventy-five seconds, Leo. The hideout, west end. Go."',
+      },
+    ],
+  },
+  {
+    id: 'the-getaway',
+    title: 'The Getaway',
+    reward: 700,
+    briefing:
+      'Rico: "The showroom on the east side keeps a supercar behind glass, ' +
+      'and tonight the glass is already broken. Take it, and get it to the ' +
+      'chop shop before the alarm brings every cruiser in the bay."',
+    steps: [
+      {
+        id: 'reach-showroom',
+        kind: 'goTo',
+        point: 'showroom',
+        text: 'Reach the showroom on the east side',
+        dialogue: 'Rico: "Supercar, gold paint, behind the glass. She is yours."',
+      },
+      {
+        id: 'take-supercar',
+        kind: 'stealCar',
+        point: 'showroom',
+        text: 'Steal the supercar (press F near it)',
+        dialogue: 'Mara: "Alarm is live. Do not admire her — drive her."',
+      },
+      {
+        id: 'outrun-alarm',
+        kind: 'timedDrive',
+        point: 'chopShop',
+        timeLimit: 90,
+        needsWanted: 2,
+        text: 'Outrun the alarm to the chop shop (90 seconds)',
+        dialogue: 'June: "Two stars already. Ninety seconds to the chop shop, Leo."',
       },
     ],
   },
@@ -357,6 +455,9 @@ export function createMissionManager(deps = {}) {
   const grabHoldById = new Map();
   /** missionId -> seconds left on a timed step, null when untimed. */
   const timeLeftById = new Map();
+  /** missionId -> 0 while a carryTo step is still at the pickup, 1 once the
+   *  package is in hand and the marker moves to the delivery point. */
+  const carryPhaseById = new Map();
 
   const completedIds = [];
   let activeMissionId = null;
@@ -374,6 +475,17 @@ export function createMissionManager(deps = {}) {
     position: null, // resolved lazily from the city / fallback table
     available: true,
     respawnIn: 0,
+  }));
+  // Photo spots: one live record per spot, with hold and cooldown timing.
+  const photoSpots = PHOTO_SPOTS.map((spot) => ({
+    name: spot.name,
+    point: spot.point,
+    reward: spot.reward,
+    dx: spot.dx ?? 0,
+    dz: spot.dz ?? 0,
+    position: null, // resolved lazily from the city / fallback table
+    holdSeconds: 0,
+    cooldownLeft: 0,
   }));
   const stolenCarIds = new Set();
   const jumpsDoneRecently = new Map(); // jump name -> seconds until it pays again
@@ -446,6 +558,12 @@ export function createMissionManager(deps = {}) {
       if (!pickup.position) {
         const base = resolvePoint(pickup.point);
         pickup.position = { x: base.x + (pickup.dx ?? 0), z: base.z + (pickup.dz ?? 0) };
+      }
+    }
+    for (const spot of photoSpots) {
+      if (!spot.position) {
+        const base = resolvePoint(spot.point);
+        spot.position = { x: base.x + (spot.dx ?? 0), z: base.z + (spot.dz ?? 0) };
       }
     }
   }
@@ -523,8 +641,13 @@ export function createMissionManager(deps = {}) {
     return def.steps[stepIndexById.get(activeMissionId) ?? 0] ?? null;
   }
 
+  // The step's live target: for a carryTo step the marker starts at the
+  // pickup point and moves to the delivery point once the package is held.
   function stepTarget(step) {
     if (!step || !step.point) return null;
+    if (step.kind === 'carryTo' && step.dest && (carryPhaseById.get(activeMissionId) ?? 0) === 1) {
+      return resolvePoint(step.dest);
+    }
     return resolvePoint(step.point);
   }
 
@@ -549,11 +672,16 @@ export function createMissionManager(deps = {}) {
     const limit = typeof step.timeLimit === 'number' ? step.timeLimit : null;
     timeLeftById.set(activeMissionId, limit);
     grabHoldById.set(activeMissionId, 0);
+    carryPhaseById.set(activeMissionId, 0);
     warnedThisStep = false;
   }
 
   function objectiveTextFor(step) {
     if (!step) return '';
+    // A carryTo step shows different text once the package is in hand.
+    if (step.kind === 'carryTo' && (carryPhaseById.get(activeMissionId) ?? 0) === 1) {
+      return `Carry the package to ${step.dest}`;
+    }
     return step.text;
   }
 
@@ -669,12 +797,37 @@ export function createMissionManager(deps = {}) {
     return collected;
   }
 
+  // Sunset photo spots: hold still inside the marker and the shot pays
+  // out. The hold resets the moment the player steps out of the frame.
+  function updatePhotoSpots(dt, playerPos) {
+    resolvePickupPositions();
+    if (!playerPos || typeof playerPos.x !== 'number' || typeof playerPos.z !== 'number') return;
+    for (const spot of photoSpots) {
+      if (spot.cooldownLeft > 0) {
+        spot.cooldownLeft = Math.max(0, spot.cooldownLeft - dt);
+        continue;
+      }
+      if (!spot.position) continue;
+      if (distance2D(playerPos, spot.position) <= PHOTO_RADIUS) {
+        spot.holdSeconds += dt;
+        if (spot.holdSeconds >= PHOTO_HOLD_SECONDS) {
+          spot.holdSeconds = 0;
+          spot.cooldownLeft = PHOTO_COOLDOWN_SECONDS;
+          const newTotal = payCash(spot.reward, `Sunset photo: ${spot.name}`);
+          emit({ type: 'photo', amount: spot.reward, spotName: spot.name, newCashTotal: newTotal });
+        }
+      } else {
+        spot.holdSeconds = 0;
+      }
+    }
+  }
+
   function registerStuntJump(jumpName, speed) {
     const jump = STUNT_JUMPS.find((j) => j.name === jumpName);
     if (!jump) return 0;
     if (typeof speed === 'number' && speed < STUNT_MIN_SPEED) return 0;
     if ((jumpsDoneRecently.get(jumpName) ?? 0) > 0) return 0;
-    jumpsDoneRecently.set(jumpName, 30); // one payout per jump per 30 seconds
+    jumpsDoneRecently.set(jumpName, FREE_ROAM.stuntCooldownSeconds); // one payout per jump per cooldown
     const newTotal = payCash(jump.reward, `Stunt jump: ${jump.name}`);
     emit({ type: 'stunt', amount: jump.reward, jumpName: jump.name, newCashTotal: newTotal });
     return jump.reward;
@@ -745,6 +898,7 @@ export function createMissionManager(deps = {}) {
     // lands in this update's event batch.
     if (ctx.playerPos) {
       collectNearbyPickups(ctx.playerPos);
+      updatePhotoSpots(stepSeconds, ctx.playerPos);
     }
 
     // A stunt is reported by main.js when the car leaves a jump ramp; the
@@ -770,7 +924,8 @@ export function createMissionManager(deps = {}) {
     const step = currentStep();
     if (!def || !step) return;
 
-    // Timed steps (Heat Wave) fail when the clock runs out.
+    // Timed steps (Heat Wave, Midnight Run, The Getaway) fail when the
+    // clock runs out.
     const timeLeft = timeLeftById.get(activeMissionId);
     if (typeof timeLeft === 'number') {
       const next = timeLeft - stepSeconds;
@@ -801,6 +956,37 @@ export function createMissionManager(deps = {}) {
     switch (step.kind) {
       case 'driveTo': {
         if (playerPos && target && inVehicle && distance2D(playerPos, target) <= ARRIVE_RADIUS) {
+          completeStep();
+        }
+        break;
+      }
+      case 'timedDrive': {
+        // Same arrival check as driveTo; the clock above handles failure.
+        if (playerPos && target && inVehicle && distance2D(playerPos, target) <= ARRIVE_RADIUS) {
+          completeStep();
+        }
+        break;
+      }
+      case 'carryTo': {
+        // Phase 0: stand in the pickup zone to grab the package. Phase 1:
+        // carry it to the delivery marker (the target moved with the phase).
+        const phase = carryPhaseById.get(activeMissionId) ?? 0;
+        if (phase === 0) {
+          const pickupPoint = resolvePoint(step.point);
+          if (playerPos && distance2D(playerPos, pickupPoint) <= GRAB_RADIUS) {
+            const held = (grabHoldById.get(def.id) ?? 0) + stepSeconds;
+            grabHoldById.set(def.id, held);
+            if (held >= GRAB_HOLD_SECONDS) {
+              grabHoldById.set(def.id, 0);
+              carryPhaseById.set(activeMissionId, 1);
+              placeMarkerAt(stepTarget(step));
+              announceObjective();
+              emit({ type: 'stepComplete', missionId: def.id, stepId: `${step.id}-grabbed` });
+            }
+          } else {
+            grabHoldById.set(def.id, 0);
+          }
+        } else if (playerPos && target && distance2D(playerPos, target) <= ARRIVE_RADIUS) {
           completeStep();
         }
         break;
@@ -873,6 +1059,14 @@ export function createMissionManager(deps = {}) {
     }));
   }
 
+  function getCompletedCount() {
+    let done = 0;
+    for (const status of statusById.values()) {
+      if (status === MISSION_STATUS.COMPLETED) done += 1;
+    }
+    return done;
+  }
+
   function getActiveMission() {
     if (!activeMissionId) return null;
     const def = definitionOf(activeMissionId);
@@ -894,7 +1088,7 @@ export function createMissionManager(deps = {}) {
     }
     return {
       title: def.title,
-      text: step.text,
+      text: objectiveTextFor(step),
       step: (stepIndexById.get(def.id) ?? 0) + 1,
       steps: def.steps.length,
       missionId: def.id,
@@ -921,6 +1115,18 @@ export function createMissionManager(deps = {}) {
       x: pickup.position?.x ?? 0,
       z: pickup.position?.z ?? 0,
       available: pickup.available,
+    }));
+  }
+
+  function getPhotoSpots() {
+    resolvePickupPositions();
+    return photoSpots.map((spot) => ({
+      name: spot.name,
+      point: spot.point,
+      reward: spot.reward,
+      x: spot.position?.x ?? 0,
+      z: spot.position?.z ?? 0,
+      ready: spot.cooldownLeft <= 0,
     }));
   }
 
@@ -956,6 +1162,7 @@ export function createMissionManager(deps = {}) {
     stepIndexById.set(def.id, 0);
     grabHoldById.set(def.id, 0);
     timeLeftById.set(def.id, null);
+    carryPhaseById.set(def.id, 0);
   });
   refreshAvailability();
   resolvePickupPositions();
@@ -963,12 +1170,15 @@ export function createMissionManager(deps = {}) {
   return {
     definitions: MISSION_DEFINITIONS,
     stuntJumps: STUNT_JUMPS,
+    photoSpots: PHOTO_SPOTS,
     marker,
     getMissionList,
+    getCompletedCount,
     getActiveMission,
     getCurrentObjective,
     getMarkerTarget,
     getCashPickups,
+    getPhotoSpots,
     getCashEarned: () => cashEarned,
     getCompletedIds: () => [...completedIds],
     getStateSnapshot,

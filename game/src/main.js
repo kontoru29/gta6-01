@@ -1,4 +1,4 @@
-// main.js — Solmar Bay bootstrap, game loop and state machine.
+// main.js — Solmar Bay bootstrap, game loop and state machine, rebuilt.
 //
 // This file turns the game modules into a playable game. It builds the
 // renderer and the city, wires every module together (with small adapters
@@ -10,6 +10,12 @@
 // things no single module owns: the player's health, the cash balance,
 // the camera while driving, shooting input, and the deterministic
 // screenshot mode (?shot=<name>&seed=<n>&cam=<mode> via shots.js).
+//
+// New this round: stunt jumps actually pay out (the loop watches for the
+// player's car crossing a jump point at speed), photo spots get their own
+// cyan markers in the world, a PIT shove spins the player's car, rams
+// now hurt Leo a little as well as his car, and the driving camera eases
+// closer as the car slows down. The menu save note counts seven missions.
 //
 // Nothing in here loads over the network: every import is a file under
 // game/, and three.js comes from the vendored import map in index.html.
@@ -55,14 +61,17 @@ import { readShotParams, applyShotStaging } from './shots.js';
 // Small adapters between modules that describe the world differently.
 // ---------------------------------------------------------------------------
 
-// The city returns lanes as {start, end, dir, ...}; vehicles and
-// pedestrians want lanes as {points: [{x,z}, ...], width}. Convert once.
+// The city returns lanes as {start, end, points, dir, ...}; vehicles and
+// pedestrians want lanes as {points: [{x,z}, ...], width}. Convert once,
+// preferring the points the city already built.
 function toPointLanes(world) {
   return (world.lanes || []).map((lane) => ({
-    points: [
-      { x: lane.start.x, z: lane.start.z },
-      { x: lane.end.x, z: lane.end.z },
-    ],
+    points: lane.points && lane.points.length >= 2
+      ? lane.points
+      : [
+        { x: lane.start.x, z: lane.start.z },
+        { x: lane.end.x, z: lane.end.z },
+      ],
     width: CITY.roadWidth,
     axis: lane.axis,
     road: lane.road,
@@ -75,27 +84,29 @@ function buildMarkerLookup(world) {
   const markers = world.missionMarkers || {};
   const named = {
     garage: 'garage',
-    pier: 'dropoff',
+    pier: 'pier',
     alley: 'package',
     plaza: 'plaza',
     marina: 'showroom',
     chopShop: 'chop-shop',
     bank: 'bank',
     safehouse: 'hideout',
+    hideout: 'hideout',
     rooftop: 'plaza',
     beach: 'beach',
     dropoff: 'dropoff',
     package: 'package',
     showroom: 'showroom',
     'chop-shop': 'chop-shop',
-    hideout: 'hideout',
     policeStation: 'policeStation',
   };
   const jumpPoints = {
-    jumpNorth: { x: 0, z: -180 },
-    jumpSouth: { x: 0, z: 180 },
-    jumpEast: { x: 180, z: 0 },
-    jumpWest: { x: -180, z: 0 },
+    jumpNorth: { x: 0, z: -215 },
+    jumpSouth: { x: 0, z: 215 },
+    jumpEast: { x: 215, z: 0 },
+    jumpWest: { x: -215, z: 0 },
+    jumpBeach: { x: -250, z: 60 },
+    jumpMarina: { x: 180, z: 60 },
   };
   return {
     getMarkerPoint(name) {
@@ -179,6 +190,13 @@ const hud = new SolmarHud(document);
 const audio = new AudioEngine();
 audio.setMuted(Boolean(save.settings && save.settings.muted));
 
+// Stolen-car bookkeeping, declared before the vehicle system so its
+// callback can close over them cleanly.
+let lastStolenCar = null;
+let lastStolenAt = -Infinity;
+let lastStolenCarId = null;
+let stolenTargetCar = false;
+
 // --- the modules, wired together.
 const player = createPlayer(scene, { city: cityAdapter });
 const vehicles = createVehicleSystem(scene, cityAdapter, {
@@ -201,7 +219,9 @@ const vehicles = createVehicleSystem(scene, cityAdapter, {
     }
     if (missions) {
       const step = missions.getCurrentObjective();
-      if (step && step.missionId === 'hot-wheels') stolenTargetCar = true;
+      if (step && (step.missionId === 'hot-wheels' || step.missionId === 'the-getaway')) {
+        stolenTargetCar = true;
+      }
     }
     updateSave((s) => {
       s.stats.carsStolen = (s.stats.carsStolen || 0) + 1;
@@ -219,11 +239,6 @@ for (const ped of pedestrians.pedestrians) {
   ped.alive = true;
 }
 
-let lastStolenCar = null;
-let lastStolenAt = -Infinity;
-let lastStolenCarId = null;
-let stolenTargetCar = false;
-
 const police = createPoliceSystem({
   scene,
   policeStation: world.spawnPoints.policeStation,
@@ -233,9 +248,21 @@ const police = createPoliceSystem({
   },
   onBusted: () => enterEndState('busted'),
   onWasted: () => enterEndState('wasted'),
-  onRam: (amount) => {
+  onRam: (amount, kind) => {
     vehicles.damagePlayerCar(amount);
     audio.noiseBurst(0.18, 0.3, 700);
+    // A ram hurts Leo a little as well as his car, so the health bar
+    // means something in a chase. A PIT is worse: it spins the car.
+    const car = vehicles.playerCar;
+    if (kind === 'pit' && car) {
+      car.heading += (Math.random() < 0.5 ? -1 : 1) * 0.55;
+      car.speed *= 0.5;
+      hud.toast('PIT maneuver! The patrol spun your car', 2);
+    }
+    if (car) {
+      health = Math.max(0, health - amount * 0.4);
+      lastDamageAt = playSeconds;
+    }
   },
 });
 
@@ -245,7 +272,11 @@ const combat = createCombatSystem({
     police.reportCrime(type, details || {});
   },
   onShot: (info) => {
-    if (info && info.weapon === 'pistol') {
+    if (info && info.weapon === 'shotgun') {
+      audio.shotgun();
+      const pos = player.group.position;
+      pedestrians.addThreat(pos.x, pos.z, 30, 'gunshot');
+    } else if (info && info.weapon === 'pistol') {
       audio.shot();
       const pos = player.group.position;
       pedestrians.addThreat(pos.x, pos.z, 26, 'gunshot');
@@ -292,6 +323,30 @@ const pickupMeshes = [];
   }
 }
 
+// Cyan photo-spot discs: stand inside one and hold still for the shot.
+const photoMeshes = [];
+{
+  const photoGeo = new THREE.CylinderGeometry(1.2, 1.2, 0.1, 20);
+  const photoMat = new THREE.MeshStandardMaterial({
+    color: 0x4fd8e8, metalness: 0.4, roughness: 0.3,
+    emissive: 0x1a7a8a, emissiveIntensity: 0.8, transparent: true, opacity: 0.85,
+  });
+  for (const spot of missions.getPhotoSpots()) {
+    const mesh = new THREE.Mesh(photoGeo, photoMat);
+    mesh.position.set(spot.x, 1.0, spot.z);
+    mesh.castShadow = false;
+    scene.add(mesh);
+    photoMeshes.push(mesh);
+  }
+}
+
+// Stunt jump spots, resolved once: the loop checks the player's car
+// against them every frame and pays out through the mission manager.
+const jumpSpots = missions.stuntJumps.map((jump) => {
+  const point = markerCity.getMarkerPoint(jump.point);
+  return { name: jump.name, x: point.x, z: point.z };
+});
+
 vehicles.spawnParked(10);
 vehicles.spawnTraffic(12);
 vehicles.spawnBikes(5);
@@ -305,9 +360,14 @@ vehicles.spawnBikes(5);
 const rng = createRng(20261117);
 
 // The road network adapter the police module wants, built once: it closes
-// over the world and the rng, both of which never change after boot.
+// over the world and the rng, both of which never change after boot. The
+// nearest-road lookup accepts either a point object or an (x, z) pair,
+// since the police module calls it both ways.
 const roadNetwork = {
-  nearestRoadPoint: (pos) => world.nearestRoadPoint(pos.x, pos.z),
+  nearestRoadPoint: (x, z) => {
+    if (typeof x === 'object' && x !== null) return world.nearestRoadPoint(x.x, x.z);
+    return world.nearestRoadPoint(x, z);
+  },
   randomRoadPointNear: (pos, minR, maxR) =>
     roadPointNearRing(world, pos, minR, maxR, rng.next.bind(rng)),
 };
@@ -333,6 +393,8 @@ const policeCtx = {
   playerCarHealth: null,
   playerCar: null,
   playerCarPosition: null,
+  playerCarHeading: 0,
+  playerHeading: 0,
   roadNetwork,
   policeStation: world.spawnPoints.policeStation,
 };
@@ -344,12 +406,16 @@ const missionCtx = {
   stolenTargetCar: false,
   stolenCarId: undefined,
   stolenCarModel: undefined,
+  stuntJump: undefined,
+  speed: 0,
   busted: false,
   wasted: false,
 };
 
 const hudSnapshot = {
   health: 100,
+  stamina: 100,
+  heat: 0,
   cash: 0,
   stars: 0,
   speedMps: 0,
@@ -374,6 +440,7 @@ const minimapData = {
   police: null,
   marker: null,
   pickups: null,
+  photoSpots: null,
   roads: world.roadSegments,
   worldRadius: MINIMAP.worldRadius,
 };
@@ -420,7 +487,7 @@ let stealPressed = false;
 
 const GAME_KEYS = new Set([
   'KeyW', 'KeyA', 'KeyS', 'KeyD', 'ShiftLeft', 'ShiftRight', 'Space',
-  'KeyE', 'KeyF', 'KeyR', 'KeyM', 'KeyP', 'Escape', 'Digit1', 'Digit2',
+  'KeyE', 'KeyF', 'KeyR', 'KeyM', 'KeyP', 'Escape', 'Digit1', 'Digit2', 'Digit3',
 ]);
 
 window.addEventListener('keydown', (event) => {
@@ -433,6 +500,7 @@ window.addEventListener('keydown', (event) => {
   if (event.code === 'KeyR' && state === 'playing') combat.reload();
   if (event.code === 'Digit1' && state === 'playing') combat.equipWeapon('fists');
   if (event.code === 'Digit2' && state === 'playing') combat.equipWeapon('pistol');
+  if (event.code === 'Digit3' && state === 'playing') combat.equipWeapon('shotgun');
   if (event.code === 'KeyP') togglePhone();
   if (event.code === 'Escape') togglePause();
   audio.ensure();
@@ -621,6 +689,9 @@ function handleMissionEvent(event) {
   } else if (event.type === 'stunt') {
     hud.toast(`Stunt jump! +${formatMoney(event.amount)}`, 3);
     audio.cash();
+  } else if (event.type === 'photo') {
+    hud.toast(`Sunset photo sold — +${formatMoney(event.amount)}`, 3);
+    audio.cash();
   } else if (event.type === 'carStolen') {
     hud.toast(`Stolen car sold on — +${formatMoney(event.amount)}`, 3);
   } else if (event.type === 'warning') {
@@ -648,7 +719,7 @@ const menuSaveNote = document.getElementById('menu-save-note');
 if (menuSaveNote) {
   if (hasSave() && (save.missionsCompleted.length > 0 || save.cash > 0)) {
     menuSaveNote.textContent =
-      `Save found: ${formatMoney(save.cash)}, ${save.missionsCompleted.length} of 5 missions done.`;
+      `Save found: ${formatMoney(save.cash)}, ${save.missionsCompleted.length} of 7 missions done.`;
   } else {
     menuSaveNote.textContent = 'No save yet — a fresh story starts with $120 in Leo’s pocket.';
   }
@@ -870,10 +941,14 @@ function updateDrivingCamera(dt) {
     camera.lookAt(cameraTarget);
     return;
   }
+  // Normal chase camera: the distance eases closer as the car slows, so
+  // parking and tight corners feel close in while speed feels open.
+  const speedFactor = clamp(Math.abs(car.speed) / 34, 0, 1);
+  const distance = CAMERA.drivingDistance * (CAMERA.closeDistanceFactor + CAMERA.farDistanceFactor * speedFactor);
   cameraDesired.set(
-    car.group.position.x - fwdX * CAMERA.drivingDistance,
+    car.group.position.x - fwdX * distance,
     CAMERA.drivingHeight,
-    car.group.position.z - fwdZ * CAMERA.drivingDistance,
+    car.group.position.z - fwdZ * distance,
   );
   camera.position.lerp(cameraDesired, Math.min(1, dt * 5));
   cameraTarget.set(
@@ -899,6 +974,19 @@ function currentPrompt() {
     }
   }
   return '';
+}
+
+// A stunt jump pays when the player's car crosses a jump point at speed.
+// The mission manager enforces the speed floor and the per-jump cooldown.
+function detectStuntJump(playerCar) {
+  if (!playerCar || Math.abs(playerCar.speed) < 24) return null;
+  const pos = playerCar.group.position;
+  for (const jump of jumpSpots) {
+    const dx = pos.x - jump.x;
+    const dz = pos.z - jump.z;
+    if (dx * dx + dz * dz < 36) return jump.name;
+  }
+  return null;
 }
 
 function stepGame(dt) {
@@ -945,6 +1033,8 @@ function stepGame(dt) {
   policeCtx.playerCarHealth = playerCar ? playerCar.health : null;
   policeCtx.playerCar = playerCar;
   policeCtx.playerCarPosition = playerCar ? playerCar.group.position : null;
+  policeCtx.playerCarHeading = playerCar ? playerCar.heading : player.heading;
+  policeCtx.playerHeading = player.heading;
   const policeEvents = police.update(dt, policeCtx);
   if (policeEvents.busted) enterEndState('busted');
   if (policeEvents.wasted) enterEndState('wasted');
@@ -957,7 +1047,8 @@ function stepGame(dt) {
   // Combat timers (cooldowns, reloads, tracers).
   combat.update(dt);
 
-  // Missions: objectives, markers, pickups, steals.
+  // Missions: objectives, markers, pickups, steals, stunts.
+  const stuntJump = detectStuntJump(playerCar);
   missionCtx.playerPos = player.group.position;
   missionCtx.inVehicle = player.inVehicle;
   missionCtx.carryingTargetCar = Boolean(lastStolenCar && player.inVehicle);
@@ -966,6 +1057,8 @@ function stepGame(dt) {
     ? lastStolenCarId
     : undefined;
   missionCtx.stolenCarModel = lastStolenCar ? lastStolenCar.type : undefined;
+  missionCtx.stuntJump = stuntJump || undefined;
+  missionCtx.speed = playerCar ? Math.abs(playerCar.speed) : 0;
   missionCtx.busted = state === 'busted';
   missionCtx.wasted = state === 'wasted';
   const missionEvents = missions.update(dt, missionCtx);
@@ -989,6 +1082,13 @@ function stepGame(dt) {
       mesh.position.y = 1.0 + Math.sin(playSeconds * 2 + i) * 0.15;
     }
   }
+  // Photo spot discs spin slowly; cooling-down spots dim until ready.
+  const spots = missions.getPhotoSpots();
+  for (let i = 0; i < photoMeshes.length && i < spots.length; i += 1) {
+    const mesh = photoMeshes[i];
+    mesh.rotation.y += dt * 0.8;
+    mesh.material.opacity = spots[i].ready ? 0.85 : 0.25;
+  }
 
   world.update(dt, playSeconds);
 
@@ -996,6 +1096,8 @@ function stepGame(dt) {
   const objective = missions.getCurrentObjective();
   const ammo = combat.getAmmo();
   hudSnapshot.health = health;
+  hudSnapshot.stamina = player.stamina;
+  hudSnapshot.heat = police.getHeat();
   hudSnapshot.cash = cash;
   hudSnapshot.stars = police.getWantedLevel();
   hudSnapshot.speedMps = playerCar ? playerCar.speed : player.speed;
@@ -1008,7 +1110,7 @@ function stepGame(dt) {
   hudSnapshot.objective = objective;
   hudSnapshot.prompt = currentPrompt();
   hudSnapshot.driving = player.inVehicle;
-  hudSnapshot.aiming = !player.inVehicle && combat.getWeapon() === 'pistol';
+  hudSnapshot.aiming = !player.inVehicle && (combat.getWeapon() === 'pistol' || combat.getWeapon() === 'shotgun');
   hud.update(hudSnapshot, dt);
   fillMinimapTraffic();
   minimapData.playerX = player.group.position.x;
@@ -1018,6 +1120,7 @@ function stepGame(dt) {
   minimapData.police = police.getBlips();
   minimapData.marker = missions.getMarkerTarget();
   minimapData.pickups = pickups;
+  minimapData.photoSpots = missions.getPhotoSpots();
   hud.drawMinimap(minimapData, dt);
   const speed01 = playerCar ? Math.abs(playerCar.speed) / 34 : 0;
   audio.update(speed01, player.inVehicle, police.getWantedLevel());

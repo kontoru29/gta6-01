@@ -1,19 +1,26 @@
-// combat.js — Solmar Bay hand-to-hand and pistol combat.
+// combat.js — Solmar Bay hand-to-hand and pistol combat, rebuilt.
 //
-// Leo Marlow fights with his fists up close and a pistol at range. Shots are
-// hitscan: a ray is cast from the muzzle, the nearest person or vehicle it
-// crosses takes damage, a tracer line and a muzzle flash sell the shot, and
-// every crime the fight causes is reported to the police system through one
-// callback so this module never decides wanted levels itself. Ammo lives in
-// a magazine plus a reserve pool; R reloads, and an empty magazine clicks
-// instead of firing. Punching is a short forward arc, so the player has to
-// face the target. Nothing here loads a file or touches the network.
+// Leo Marlow fights with his fists up close, a pistol at range, and —
+// new this round — a shotgun: six pellets per shell, brutal up close,
+// useless past a street's width. Shots are hitscan: a ray is cast from
+// the muzzle, the nearest person or vehicle it crosses takes damage, a
+// tracer line and a muzzle flash sell the shot, and every crime the
+// fight causes is reported to the police system through one callback so
+// this module never decides wanted levels itself. Ammo lives in a
+// magazine plus a reserve pool per gun; R reloads, and an empty magazine
+// clicks instead of firing. Punching is a short forward arc, so the
+// player has to face the target. Nothing here loads a file or touches
+// the network.
+//
+// Pistol damage falls off past forty metres now, so long shots sting
+// less than point-blank ones. The shotgun's six pellets each roll their
+// own ray: several can land on the same target, and the damage adds up.
 //
 // PUBLIC API — createCombatSystem(options) returns:
-//   equipWeapon(name)           -> 'fists' or 'pistol'; returns true if equipped
+//   equipWeapon(name)           -> 'fists', 'pistol' or 'shotgun'; true if equipped
 //   getWeapon()                 -> current weapon name
-//   getAmmo()                   -> { inMagazine, reserve, reloading }
-//   shoot(origin, direction, targets) -> fire the pistol once; returns
+//   getAmmo()                   -> { inMagazine, reserve, reloading } for the current gun
+//   shoot(origin, direction, targets) -> fire the current gun once; returns
 //                                  { fired, reason, hit, target, damage,
 //                                    killed, point } — reason is one of
 //                                  'ok' | 'cooldown' | 'reloading' |
@@ -25,7 +32,7 @@
 //   reportTheft(vehicle)        -> report a stolen car as a crime; returns true
 //   update(dt)                  -> advance cooldowns, reloads, tracers, flash
 //   getStats()                  -> { shotsFired, shotsHit, kills, crimes }
-//   reset()                     -> fists equipped, pistol refilled, stats cleared
+//   reset()                     -> fists equipped, guns refilled, stats cleared
 //   dispose()                   -> remove tracers and flash from the scene
 //   currentWeapon / ammoInMagazine / reserveAmmo  -> live read-only getters
 //
@@ -41,9 +48,12 @@
 // Options: { scene, onCrime, onShot, onHit, onKill, onReload, onAmmoChanged,
 //            onWeaponChanged, random, tracerColor }
 import * as THREE from 'three';
+import { COMBAT } from './config.js';
 
 // ---------------------------------------------------------------------------
 // Weapon tuning — one table per weapon, so balance lives in one place.
+// The shotgun's numbers come from config.js; the fists and pistol keep
+// the values the game has always shipped with.
 // ---------------------------------------------------------------------------
 
 export const WEAPONS = {
@@ -68,13 +78,29 @@ export const WEAPONS = {
     reloadSeconds: 1.4,
     spreadRadians: 0.022,
     tracerSeconds: 0.07,
+    falloffStart: 40, // past this range a pistol shot deals 60% damage
+    falloffFactor: 0.6,
+  },
+  shotgun: {
+    name: 'shotgun',
+    displayName: 'Shotgun',
+    damage: COMBAT.shotgunDamage,
+    pellets: COMBAT.shotgunPellets,
+    range: COMBAT.shotgunRange,
+    magazineSize: COMBAT.shotgunMagazine,
+    reserveStart: COMBAT.shotgunReserveStart,
+    reserveMax: 60,
+    cooldownSeconds: COMBAT.shotgunFireInterval,
+    reloadSeconds: COMBAT.shotgunReloadTime,
+    spreadRadians: COMBAT.shotgunSpread,
+    tracerSeconds: 0.09,
   },
 };
 
 const FLASH_SECONDS = 0.055;
 const VEHICLE_DESTROY_BONUS_CRIME = 'shooting';
 
-function clamp(value, min, max) {
+function clampValue(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
 
@@ -115,8 +141,11 @@ export function createCombatSystem(options = {}) {
   const onWeaponChanged = options.onWeaponChanged || null;
 
   let currentWeapon = 'fists';
-  let ammoInMagazine = WEAPONS.pistol.magazineSize;
-  let reserveAmmo = WEAPONS.pistol.reserveStart;
+  // One magazine + reserve per gun, so switching weapons keeps its ammo.
+  const ammoStores = {
+    pistol: { inMagazine: WEAPONS.pistol.magazineSize, reserve: WEAPONS.pistol.reserveStart },
+    shotgun: { inMagazine: WEAPONS.shotgun.magazineSize, reserve: WEAPONS.shotgun.reserveStart },
+  };
   let cooldown = 0;
   let reloading = false;
   let reloadTimer = 0;
@@ -152,9 +181,19 @@ export function createCombatSystem(options = {}) {
     if (onCrime) onCrime(type, details || {});
   }
 
+  function currentAmmoStore() {
+    return ammoStores[currentWeapon] || null;
+  }
+
   function announceAmmo() {
     if (onAmmoChanged) {
-      onAmmoChanged({ weapon: currentWeapon, inMagazine: ammoInMagazine, reserve: reserveAmmo, reloading });
+      const store = currentAmmoStore();
+      onAmmoChanged({
+        weapon: currentWeapon,
+        inMagazine: store ? store.inMagazine : 0,
+        reserve: store ? store.reserve : 0,
+        reloading,
+      });
     }
   }
 
@@ -280,7 +319,7 @@ export function createCombatSystem(options = {}) {
   // -- Public API -----------------------------------------------------------
 
   function equipWeapon(name) {
-    if (name !== 'fists' && name !== 'pistol') return false;
+    if (name !== 'fists' && name !== 'pistol' && name !== 'shotgun') return false;
     if (name === currentWeapon) return true;
     if (reloading) {
       reloading = false;
@@ -294,11 +333,12 @@ export function createCombatSystem(options = {}) {
   }
 
   function reload() {
-    const weapon = WEAPONS.pistol;
-    if (currentWeapon !== 'pistol') return false;
+    const store = currentAmmoStore();
+    const weapon = WEAPONS[currentWeapon];
+    if (!store || !weapon || !weapon.magazineSize) return false;
     if (reloading) return false;
-    if (ammoInMagazine >= weapon.magazineSize) return false;
-    if (reserveAmmo <= 0) return false;
+    if (store.inMagazine >= weapon.magazineSize) return false;
+    if (store.reserve <= 0) return false;
     reloading = true;
     reloadTimer = weapon.reloadSeconds;
     if (onReload) onReload({ started: true });
@@ -306,80 +346,125 @@ export function createCombatSystem(options = {}) {
     return true;
   }
 
+  function emptyResult(reason) {
+    return { fired: false, reason, hit: false, target: null, damage: 0, killed: false, point: null };
+  }
+
   function shoot(originValue, directionValue, targets) {
     const origin = toVector3(originValue);
     const rawDirection = toVector3(directionValue);
-    if (rawDirection.lengthSq() < 0.0001) {
-      return { fired: false, reason: 'noTarget', hit: false, target: null, damage: 0, killed: false, point: null };
-    }
-    if (currentWeapon !== 'pistol') {
-      return { fired: false, reason: 'fists', hit: false, target: null, damage: 0, killed: false, point: null };
-    }
-    if (reloading) {
-      return { fired: false, reason: 'reloading', hit: false, target: null, damage: 0, killed: false, point: null };
-    }
-    if (cooldown > 0) {
-      return { fired: false, reason: 'cooldown', hit: false, target: null, damage: 0, killed: false, point: null };
-    }
-    if (ammoInMagazine <= 0) {
+    if (rawDirection.lengthSq() < 0.0001) return emptyResult('noTarget');
+    if (currentWeapon === 'fists') return emptyResult('fists');
+    if (reloading) return emptyResult('reloading');
+    if (cooldown > 0) return emptyResult('cooldown');
+    const store = currentAmmoStore();
+    const weapon = WEAPONS[currentWeapon];
+    if (!store || !weapon) return emptyResult('noTarget');
+    if (store.inMagazine <= 0) {
       if (onShot) onShot({ fired: false, reason: 'empty' });
-      return { fired: false, reason: 'empty', hit: false, target: null, damage: 0, killed: false, point: null };
+      return emptyResult('empty');
     }
 
-    const weapon = WEAPONS.pistol;
-    ammoInMagazine -= 1;
+    store.inMagazine -= 1;
     cooldown = weapon.cooldownSeconds;
     shotsFired += 1;
 
     // Spread: jitter the aim a little so long shots are not laser-perfect.
-    const direction = rawDirection.clone().normalize();
+    const baseDirection = rawDirection.clone().normalize();
     const spread = weapon.spreadRadians;
-    direction.x += (random() - 0.5) * 2 * spread;
-    direction.y += (random() - 0.5) * 2 * spread;
-    direction.z += (random() - 0.5) * 2 * spread;
-    direction.normalize();
 
-    const pick = pickRayTarget(origin, direction, targets, weapon.range);
-    const endPoint = pick.target
-      ? origin.clone().addScaledVector(direction, pick.distance)
-      : origin.clone().addScaledVector(direction, weapon.range);
-    spawnTracer(origin.clone().addScaledVector(direction, 0.6), endPoint);
-    showMuzzleFlash(origin, direction);
+    // The shotgun fires a spread of pellets, each on its own ray. Pellets
+    // that land on the same target add their damage together, so a close
+    // blast can drop a target in one shell while a far one just stings.
+    const pelletCount = weapon.pellets || 1;
+    const hitsByTarget = new Map();
+    let nearestHit = null;
+    let nearestDistance = Infinity;
+    let farthestPoint = null;
+    for (let p = 0; p < pelletCount; p += 1) {
+      const direction = baseDirection.clone();
+      direction.x += (random() - 0.5) * 2 * spread;
+      direction.y += (random() - 0.5) * 2 * spread;
+      direction.z += (random() - 0.5) * 2 * spread;
+      direction.normalize();
+      const pick = pickRayTarget(origin, direction, targets, weapon.range);
+      if (pick.target) {
+        const soFar = hitsByTarget.get(pick.target) || 0;
+        hitsByTarget.set(pick.target, soFar + weapon.damage);
+        if (pick.distance < nearestDistance) {
+          nearestDistance = pick.distance;
+          nearestHit = pick.target;
+        }
+        const point = origin.clone().addScaledVector(direction, pick.distance);
+        if (!farthestPoint || pick.distance > farthestPoint.distance) {
+          farthestPoint = { point, distance: pick.distance };
+        }
+      }
+    }
+
+    const endPoint = farthestPoint
+      ? farthestPoint.point
+      : origin.clone().addScaledVector(baseDirection, weapon.range);
+    spawnTracer(origin.clone().addScaledVector(baseDirection, 0.6), endPoint);
+    showMuzzleFlash(origin, baseDirection);
 
     // Firing a gun in the street is itself a crime — but only report it
     // once per shot: on a hit, finishAttack() below reports the hit/kill
     // crime instead, so a single shot never counts twice.
-    if (!pick.target) reportCrime('shooting', { hit: false });
-    if (onShot) onShot({ fired: true, weapon: 'pistol', point: endPoint, target: pick.target });
+    if (hitsByTarget.size === 0) reportCrime('shooting', { hit: false });
+    if (onShot) onShot({ fired: true, weapon: currentWeapon, point: endPoint, target: nearestHit });
     announceAmmo();
 
-    const result = {
+    // Pistol damage falls off past forty metres: long shots sting less.
+    let totalDamage = 0;
+    let firstTarget = null;
+    let firstPoint = endPoint;
+    let killedAny = false;
+    let remainingHealth = null;
+    for (const [target, damage] of hitsByTarget) {
+      let dealt = damage;
+      if (currentWeapon === 'pistol' && nearestDistance > weapon.falloffStart) {
+        dealt = Math.round(damage * weapon.falloffFactor);
+      }
+      if (!firstTarget) {
+        firstTarget = target;
+        firstPoint = origin.clone().addScaledVector(baseDirection, nearestDistance);
+      }
+      totalDamage += dealt;
+      const result = {
+        fired: true,
+        reason: 'ok',
+        hit: true,
+        target,
+        damage: dealt,
+        killed: false,
+        remainingHealth: null,
+        point: firstPoint,
+      };
+      finishAttack(result, target, currentWeapon, firstPoint);
+      if (result.killed) killedAny = true;
+      remainingHealth = result.remainingHealth;
+    }
+
+    if (hitsByTarget.size > 0) shotsHit += 1;
+    return {
       fired: true,
       reason: 'ok',
-      hit: Boolean(pick.target),
-      target: pick.target || null,
-      damage: pick.target ? weapon.damage : 0,
-      killed: false,
-      remainingHealth: null,
+      hit: hitsByTarget.size > 0,
+      target: firstTarget,
+      damage: totalDamage,
+      killed: killedAny,
+      remainingHealth,
       point: endPoint,
     };
-    if (pick.target) {
-      shotsHit += 1;
-      finishAttack(result, pick.target, 'pistol', endPoint);
-    }
-    return result;
   }
 
   function punch(originValue, facingValue, targets) {
     const origin = toVector3(originValue);
     const facing = toVector3(facingValue);
-    if (facing.lengthSq() < 0.0001) {
-      return { fired: false, reason: 'noTarget', hit: false, target: null, damage: 0, killed: false, point: null };
-    }
+    if (facing.lengthSq() < 0.0001) return emptyResult('noTarget');
     // Fists are always available: a punch works whatever weapon is equipped.
-    if (cooldown > 0) {
-      return { fired: false, reason: 'cooldown', hit: false, target: null, damage: 0, killed: false, point: null };
-    }
+    if (cooldown > 0) return emptyResult('cooldown');
     const weapon = WEAPONS.fists;
     cooldown = weapon.cooldownSeconds;
     facing.normalize();
@@ -396,7 +481,7 @@ export function createCombatSystem(options = {}) {
       if (distance > weapon.range) continue;
       if (distance > 0.01) toTarget.normalize();
       const flatFacing = new THREE.Vector3(facing.x, 0, facing.z).normalize();
-      const angle = Math.acos(clamp(toTarget.dot(flatFacing), -1, 1));
+      const angle = Math.acos(clampValue(toTarget.dot(flatFacing), -1, 1));
       if (angle > weapon.arcRadians) continue;
       if (distance < bestDistance) {
         bestDistance = distance;
@@ -436,12 +521,15 @@ export function createCombatSystem(options = {}) {
       reloadTimer -= step;
       if (reloadTimer <= 0) {
         reloading = false;
-        const weapon = WEAPONS.pistol;
-        const needed = weapon.magazineSize - ammoInMagazine;
-        const loaded = Math.min(needed, reserveAmmo);
-        ammoInMagazine += loaded;
-        reserveAmmo -= loaded;
-        if (onReload) onReload({ started: false, loaded });
+        const weapon = WEAPONS[currentWeapon];
+        const store = currentAmmoStore();
+        if (weapon && store) {
+          const needed = weapon.magazineSize - store.inMagazine;
+          const loaded = Math.min(needed, store.reserve);
+          store.inMagazine += loaded;
+          store.reserve -= loaded;
+          if (onReload) onReload({ started: false, loaded });
+        }
         announceAmmo();
       }
     }
@@ -461,15 +549,21 @@ export function createCombatSystem(options = {}) {
   }
 
   function addAmmo(amount) {
-    reserveAmmo = clamp(reserveAmmo + Math.max(0, amount), 0, WEAPONS.pistol.reserveMax);
+    // Ammo goes to the gun in hand; fists send it to the pistol reserve.
+    const key = currentWeapon === 'shotgun' ? 'shotgun' : 'pistol';
+    const store = ammoStores[key];
+    const weapon = WEAPONS[key];
+    store.reserve = clampValue(store.reserve + Math.max(0, amount), 0, weapon.reserveMax);
     announceAmmo();
-    return reserveAmmo;
+    return store.reserve;
   }
 
   function reset() {
     currentWeapon = 'fists';
-    ammoInMagazine = WEAPONS.pistol.magazineSize;
-    reserveAmmo = WEAPONS.pistol.reserveStart;
+    ammoStores.pistol.inMagazine = WEAPONS.pistol.magazineSize;
+    ammoStores.pistol.reserve = WEAPONS.pistol.reserveStart;
+    ammoStores.shotgun.inMagazine = WEAPONS.shotgun.magazineSize;
+    ammoStores.shotgun.reserve = WEAPONS.shotgun.reserveStart;
     cooldown = 0;
     reloading = false;
     reloadTimer = 0;
@@ -499,12 +593,27 @@ export function createCombatSystem(options = {}) {
 
   return {
     get currentWeapon() { return currentWeapon; },
-    get ammoInMagazine() { return ammoInMagazine; },
-    get reserveAmmo() { return reserveAmmo; },
+    get ammoInMagazine() {
+      const store = currentAmmoStore();
+      return store ? store.inMagazine : 0;
+    },
+    get reserveAmmo() {
+      const store = currentAmmoStore();
+      return store ? store.reserve : 0;
+    },
     get reloading() { return reloading; },
     equipWeapon,
     getWeapon: () => currentWeapon,
-    getAmmo: () => ({ inMagazine: ammoInMagazine, reserve: reserveAmmo, reloading }),
+    getAmmo: () => {
+      const store = currentAmmoStore();
+      return {
+        inMagazine: store ? store.inMagazine : 0,
+        reserve: store ? store.reserve : 0,
+        reloading,
+      };
+    },
+    // Spare rounds across both guns, for a future ammo HUD total.
+    getTotalReserve: () => ammoStores.pistol.reserve + ammoStores.shotgun.reserve,
     shoot,
     punch,
     reload,

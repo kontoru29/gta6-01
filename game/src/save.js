@@ -1,4 +1,4 @@
-// save.js — Solmar Bay's save file: cash, missions, best runs.
+// save.js — Solmar Bay's save file: cash, missions, best runs, rebuilt.
 //
 // Everything the game remembers between sessions lives in one small JSON
 // blob in localStorage: a version, the cash balance, finished mission ids,
@@ -11,11 +11,21 @@
 // call is wrapped too: a missing or hostile localStorage (private mode,
 // storage off, a non-browser runtime) just makes the functions fall back
 // to an in-memory save.
+//
+// New this round: every write rotates three backup slots first, so a
+// half-written save never strands a story — loading falls back to the
+// newest readable backup when the main slot is corrupt. The stats also
+// count sunset photos now, alongside stunts and pickups.
 
 // The key is a contract with every save already out there — never rename
 // it, or old saves strand.
 export const SAVE_KEY = 'solmar-bay.save.v1';
 export const SAVE_VERSION = 1;
+
+// Three backup slots, newest first. A write shifts the old slots down
+// and stores the previous main save in slot one.
+const BACKUP_COUNT = 3;
+const BACKUP_KEY = (slot) => `${SAVE_KEY}.bak${slot}`;
 
 // Ceilings so a runaway number can't break the HUD or bloat the file.
 const CASH_CAP = 999999999;
@@ -45,35 +55,54 @@ export function isStorageAvailable() {
   }
 }
 
-function fetchText() {
+function fetchText(key) {
   const store = storage();
   if (!store) return null;
   try {
-    return store.getItem(SAVE_KEY);
+    return store.getItem(key);
   } catch {
     return null;
   }
 }
 
-function storeText(text) {
+function storeText(key, text) {
   const store = storage();
   if (!store) return false;
   try {
-    store.setItem(SAVE_KEY, text);
+    store.setItem(key, text);
     return true;
   } catch {
     return false;
   }
 }
 
-function clearText() {
+function clearText(key) {
   const store = storage();
   if (!store) return false;
   try {
-    store.removeItem(SAVE_KEY);
+    store.removeItem(key);
     return true;
   } catch {
     return false;
+  }
+}
+
+// Shift the backups down one slot and store the current main save as the
+// newest backup. Best-effort: a failed rotation never blocks the write.
+function rotateBackups() {
+  const store = storage();
+  if (!store) return;
+  try {
+    const current = store.getItem(SAVE_KEY);
+    if (current === null || current === '') return;
+    for (let slot = BACKUP_COUNT; slot > 1; slot -= 1) {
+      const older = store.getItem(BACKUP_KEY(slot - 1));
+      if (older !== null) store.setItem(BACKUP_KEY(slot), older);
+      else store.removeItem(BACKUP_KEY(slot));
+    }
+    store.setItem(BACKUP_KEY(1), current);
+  } catch {
+    // Backups are a safety net, not a requirement.
   }
 }
 
@@ -126,6 +155,7 @@ export function createDefaultSave() {
       carsStolen: 0,
       stunts: 0,
       pickups: 0,
+      photosTaken: 0,
       timesBusted: 0,
       timesWasted: 0,
     },
@@ -166,15 +196,29 @@ export function sanitizeSave(raw) {
   return clean;
 }
 
-// ----------------------------------------------------- load / save / update
-export function loadSave() {
-  const text = fetchText();
-  if (text === null || text === '') return createDefaultSave();
+// Try to parse one stored slot into a save; null when the slot is empty
+// or does not parse.
+function parseSlot(key) {
+  const text = fetchText(key);
+  if (text === null || text === '') return null;
   try {
     return sanitizeSave(JSON.parse(text));
   } catch {
-    return createDefaultSave();
+    return null;
   }
+}
+
+// ----------------------------------------------------- load / save / update
+export function loadSave() {
+  // The main slot first; a corrupt main save falls back to the newest
+  // readable backup, so a half-written write never strands a story.
+  const main = parseSlot(SAVE_KEY);
+  if (main) return main;
+  for (let slot = 1; slot <= BACKUP_COUNT; slot += 1) {
+    const backup = parseSlot(BACKUP_KEY(slot));
+    if (backup) return backup;
+  }
+  return createDefaultSave();
 }
 
 // Write a save object to storage. It is sanitised first, so callers may
@@ -183,7 +227,8 @@ export function loadSave() {
 export function saveSave(saveData) {
   const clean = sanitizeSave(saveData);
   clean.updatedAt = new Date().toISOString();
-  return storeText(JSON.stringify(clean));
+  rotateBackups();
+  return storeText(SAVE_KEY, JSON.stringify(clean));
 }
 
 // Load, let `patch` change the save in place, then write it back. Returns
@@ -200,7 +245,7 @@ export function updateSave(patch) {
 // JSON object under the key does not count: a genuine save always carries
 // a cash number or a missions list.
 export function hasSave() {
-  const text = fetchText();
+  const text = fetchText(SAVE_KEY);
   if (text === null || text === '') return false;
   try {
     const parsed = JSON.parse(text);
@@ -211,10 +256,11 @@ export function hasSave() {
   }
 }
 
-// Wipe the stored save and hand back a fresh default. The game reloads
-// right after calling this.
+// Wipe the stored save and its backups, and hand back a fresh default.
+// The game reloads right after calling this.
 export function resetSave() {
-  clearText();
+  clearText(SAVE_KEY);
+  for (let slot = 1; slot <= BACKUP_COUNT; slot += 1) clearText(BACKUP_KEY(slot));
   return createDefaultSave();
 }
 
@@ -271,4 +317,15 @@ export function importSaveJSON(text) {
   } catch {
     return null;
   }
+}
+
+// Which backup slots hold a save that still parses, newest first. A
+// future restore menu can offer these; today it is a health check for the
+// rotation: a slot that never parses is a slot the rotation never filled.
+export function listBackups() {
+  const found = [];
+  for (let slot = 1; slot <= BACKUP_COUNT; slot += 1) {
+    if (parseSlot(BACKUP_KEY(slot))) found.push(slot);
+  }
+  return found;
 }

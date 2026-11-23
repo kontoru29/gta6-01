@@ -1,8 +1,10 @@
-// utils.js — Solmar Bay small math and random helpers shared by every module.
-// A seeded RNG (mulberry32) drives the deterministic screenshot mode, plain
-// clamp/lerp/angle helpers keep movement and AI code short, and the tiny
-// 2D/3D vector helpers work on plain {x, y, z} objects so modules never have
-// to import three.js just to do arithmetic. No state is kept here except the
+// utils.js — Solmar Bay small math and random helpers, rebuilt.
+//
+// A seeded RNG (mulberry32) drives the deterministic screenshot mode,
+// plain clamp/lerp/angle helpers keep movement and AI code short, easing
+// helpers smooth the camera and UI motion, and the tiny 2D/3D vector
+// helpers work on plain {x, y, z} objects so modules never have to
+// import three.js just to do arithmetic. No state is kept here except the
 // default RNG instance; callers that need reproducibility create their own.
 
 import { DEFAULT_SEED } from './config.js';
@@ -11,6 +13,12 @@ import { DEFAULT_SEED } from './config.js';
 export function clamp(value, min, max) {
   if (value < min) return min;
   if (value > max) return max;
+  return value;
+}
+
+export function clamp01(value) {
+  if (value < 0) return 0;
+  if (value > 1) return 1;
   return value;
 }
 
@@ -31,6 +39,24 @@ export function damp(current, target, rate, dt) {
   if (dt <= 0) return current;
   const t = 1 - Math.exp(-rate * dt);
   return current + (target - current) * t;
+}
+
+// Easing curves for camera moves and UI motion: t is 0..1, the answer is
+// 0..1. easeOutCubic starts fast and settles gently; easeInOutQuad is
+// slow at both ends; smoothstep is the classic S-curve.
+export function easeOutCubic(t) {
+  const u = clamp01(t);
+  return 1 - (1 - u) * (1 - u) * (1 - u);
+}
+
+export function easeInOutQuad(t) {
+  const u = clamp01(t);
+  return u < 0.5 ? 2 * u * u : 1 - (-2 * u + 2) * (-2 * u + 2) / 2;
+}
+
+export function smoothstep(edge0, edge1, x) {
+  const u = clamp01((x - edge0) / (edge1 - edge0));
+  return u * u * (3 - 2 * u);
 }
 
 export function normalizeAngle(angle) {
@@ -75,8 +101,8 @@ export function formatSpeedKmh(metresPerSecond) {
 
 // ------------------------------------------------------------- seeded random
 // mulberry32: small, fast, and good enough for city layout and traffic.
-// The same seed always produces the same sequence, which is what makes the
-// screenshot staging deterministic.
+// The same seed always produces the same sequence, which is what makes
+// the screenshot staging deterministic.
 export function createRng(seed) {
   let state = (seed >>> 0) || 1;
   function next() {
@@ -278,4 +304,12 @@ export function debounce(fn, waitMs) {
       fn(...args);
     }, waitMs);
   };
+}
+
+// Format a duration in seconds as "M:SS" for run timers and the HUD clock.
+export function formatTime(totalSeconds) {
+  const total = Math.max(0, Math.floor(totalSeconds));
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  return minutes + ':' + (seconds < 10 ? '0' + seconds : '' + seconds);
 }

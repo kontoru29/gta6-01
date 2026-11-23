@@ -1,4 +1,4 @@
-// shots.js — Solmar Bay deterministic screenshot staging.
+// shots.js — Solmar Bay deterministic screenshot staging, rebuilt.
 //
 // Loading the page with ?shot=<name>&seed=<n> poses one fixed scene and
 // nothing else: it never changes the real game balance, never edits a
@@ -27,10 +27,12 @@
 //             roadster parked at the far kerb and a motorbike filtering
 //             down the avenue.
 //   drive   — Leo driving a red supercar through traffic: speed, minimap,
-//             1 wanted star, a motorbike in the oncoming lane.
+//             1 wanted star, a motorbike in the oncoming lane, and the
+//             new taxi and pickup body styles parked at the kerbs.
 //   chase   — a police chase: 2-3 patrol cars and a police motorbike
 //             behind Leo's yellow sport coupe, 3 wanted stars, police
-//             blips on the minimap, mission objective on the HUD.
+//             blips on the minimap, mission objective on the HUD, and the
+//             helicopter hovering overhead.
 //   mission — a mission in progress: Leo on foot with his pistol near the
 //             bank marker, 2 wanted stars, cash and progress on the HUD,
 //             a motorbike cruising the cross street behind him.
@@ -215,11 +217,12 @@ function stageCover(game, rng) {
   parkStealable(game, 12.5, -2, Math.PI / 2);
   // A blue roadster parked at the far kerb, and a motorbike filtering
   // down the avenue toward the camera, so the cover shows the new rides.
-  // A second parked car — a yellow coupe on the east kerb — so the cover
-  // shows two rides waiting to be stolen, not one.
+  // A second parked car — a yellow sport coupe on the east kerb, a real
+  // sport body now, not a sedan in disguise — so the cover shows two
+  // rides waiting to be stolen, not one.
   try {
     game.vehicles.spawnCarAt('roadster', 0x2f7fd0, -12.5, -6, Math.PI / 2);
-    game.vehicles.spawnCarAt('coupe', 0xe8b93c, 12.5, -12, Math.PI / 2);
+    game.vehicles.spawnCarAt('sport', 0xe8b93c, 12.5, -12, Math.PI / 2);
     place(game.vehicles.spawnBikeAt(3.5, -14, Math.PI), 3.5, -14, Math.PI, 12);
   } catch {
     // Staging extras are optional; the shot still works without them.
@@ -265,6 +268,15 @@ function stageDrive(game, rng, cam) {
   // A motorbike in the oncoming lane, closing on Leo as he drives north.
   try {
     place(game.vehicles.spawnBikeAt(3.5, 16, Math.PI), 3.5, 16, Math.PI, 14);
+  } catch {
+    // Staging extras are optional; the shot still works without them.
+  }
+  // The new body styles, parked at the kerbs where the camera catches
+  // them: a yellow taxi on the west side and a green pickup on the east,
+  // so the drive shot shows the garage grew, not just the supercar.
+  try {
+    game.vehicles.spawnCarAt('taxi', 0xf2b234, -12.5, 30, Math.PI / 2);
+    game.vehicles.spawnCarAt('pickup', 0x37b268, 12.5, 62, Math.PI / 2);
   } catch {
     // Staging extras are optional; the shot still works without them.
   }
@@ -345,6 +357,19 @@ function stageChase(game, rng, cam) {
   game.police.setWantedLevel(3);
   game.setCash(820);
   openMission(game, 'first-fare');
+  // The helicopter hovers over the chase, its searchlight cone and
+  // spinning rotor in the sky above the pack — the five-star unit, shown
+  // here as a visual extra without changing the three-star wanted level.
+  // place() sets y to 0, so the hover height is restored right after.
+  try {
+    const heli = game.police.spawnAt({ x: 0, z: 30 }, 'heli');
+    if (heli) {
+      place(heli, 0, 30, Math.PI, 0);
+      heli.group.position.y = 42;
+    }
+  } catch {
+    // The shot still works without the helicopter in frame.
+  }
   spreadTraffic(game, [
     { x: -3.5, z: 8, heading: 0, speed: 11 },
     { x: 3.5, z: -30, heading: Math.PI, speed: 10 },
@@ -447,3 +472,14 @@ export function applyShotStaging(game, shotName, seed, cam) {
 }
 
 export default applyShotStaging;
+
+// A one-line label for a shot name, for capture logs and menus.
+export function describeShot(name) {
+  switch (name) {
+    case 'cover': return 'Leo on foot at the crossroads';
+    case 'drive': return 'Leo driving through traffic at one star';
+    case 'chase': return 'A three-star police chase';
+    case 'mission': return 'A job in progress, pistol drawn';
+    default: return 'Free roam';
+  }
+}

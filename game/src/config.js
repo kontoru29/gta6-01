@@ -9,6 +9,7 @@
 // --------------------------------------------------------------- who / where
 export const GAME_TITLE = 'Solmar Bay';
 export const GAME_SUBTITLE = 'A Marisol Bay story';
+export const GAME_VERSION = 'Round 7';
 export const PROTAGONIST_NAME = 'Leo Marlow';
 export const CREW_NAME = 'Marisol crew';
 
@@ -81,10 +82,13 @@ export const CAR = {
 
 // Every body style the vehicle builder can stamp out, with its footprint
 // and its pace. Roadster and supercar sit at the quick end of the list.
+// The sport coupe is the crew's favourite: quick, grippy, and common
+// enough in traffic that a stolen one does not stand out at once.
 export const CAR_TYPES = {
   sedan: { length: 4.4, width: 1.9, height: 1.35, topSpeed: 32, accel: 13, label: 'Sedan' },
   hatch: { length: 3.9, width: 1.8, height: 1.45, topSpeed: 29, accel: 15, label: 'Hatch' },
   coupe: { length: 4.3, width: 1.9, height: 1.2, topSpeed: 36, accel: 15, label: 'Coupe' },
+  sport: { length: 4.3, width: 1.95, height: 1.18, topSpeed: 44, accel: 19, label: 'Sport' },
   van: { length: 5.0, width: 2.0, height: 1.9, topSpeed: 26, accel: 10, label: 'Van' },
   pickup: { length: 4.8, width: 2.0, height: 1.7, topSpeed: 30, accel: 12, label: 'Pickup' },
   police: { length: 4.5, width: 1.95, height: 1.4, topSpeed: 38, accel: 17, label: 'Patrol car' },
@@ -105,10 +109,12 @@ export const VEHICLES = {
   policeBikeTurnRate: 3.6,
 };
 
-// Bright golden-hour paint for traffic and parked cars.
+// Bright golden-hour paint for traffic and parked cars. The last three
+// are new for Round 7: a teal sport paint, a sunset orange and a cream.
 export const CAR_COLORS = [
   0xd94f3d, 0x3d7bd9, 0xe8b93c, 0xeeeee6, 0x2f3336, 0x7fb069,
   0xc96f9b, 0x4fb3a9, 0xe07b39, 0x8a7bd9, 0xb8c4cc, 0x5a8f5a,
+  0x1f8a7a, 0xe86a2c, 0xf2e6c9,
 ];
 
 // ------------------------------------------------------------ wanted level
@@ -153,10 +159,30 @@ export const COMBAT = {
   policeHealth: 80,
   playerRegenDelay: 8,
   playerRegenPerSecond: 6,
+  // Round 7 adds a close-range shotgun: six pellets per shell, brutal up
+  // close, useless past a street's width. Found in the new missions.
+  shotgunDamage: 18,
+  shotgunPellets: 6,
+  shotgunRange: 28,
+  shotgunMagazine: 6,
+  shotgunReserveStart: 30,
+  shotgunFireInterval: 0.9,
+  shotgunReloadTime: 2.2,
+  shotgunSpread: 0.09,
+};
+
+// Sprint stamina: running drains it, walking and standing refill it. Leo
+// cannot sprint again until it climbs back past the floor, so a chase
+// costs something instead of being free forever.
+export const STAMINA = {
+  max: 100,
+  drainPerSecond: 18,
+  regenPerSecond: 12,
+  minToRun: 25,
 };
 
 // ------------------------------------------------------------ the story
-// Five missions, in order. Rewards are dollars; the save file remembers
+// Seven missions, in order. Rewards are dollars; the save file remembers
 // which ones are finished.
 export const MISSIONS = [
   {
@@ -201,6 +227,22 @@ export const MISSIONS = [
     targetKey: 'hideout',
     wantedOnStart: 4,
   },
+  {
+    id: 'midnight-run',
+    title: 'Midnight Run',
+    brief: 'Smuggle the shipment from the pier to the hideout before the patrols close in.',
+    reward: 550,
+    markerKey: 'pier',
+    targetKey: 'hideout',
+  },
+  {
+    id: 'the-getaway',
+    title: 'The Getaway',
+    brief: 'The crew needs a clean sport coupe. Steal the marked one and bring it to the chop shop, fast.',
+    reward: 700,
+    markerKey: 'showroom',
+    targetKey: 'chop-shop',
+  },
 ];
 
 export const MONEY = {
@@ -211,6 +253,46 @@ export const MONEY = {
   pedestrianDropChance: 0.25,
   pedestrianDropValue: 15,
 };
+
+// ------------------------------------------------------------ districts
+// The six named districts of Marisol Bay, each with its rectangle and its
+// own building palette. The city builder paints each district from its
+// own colours, so Downtown reads glassy and tall, Mercado reads low and
+// warm, and Coral Shore reads pale and seaside.
+export const DISTRICTS = [
+  {
+    name: 'BEACH', minX: -272, maxX: -228, minZ: -240, maxZ: 240,
+    palette: [0xf2e3c6, 0xe8d29a, 0xf5d7d0],
+  },
+  {
+    name: 'DOWNTOWN', minX: -60, maxX: 180, minZ: -240, maxZ: 0,
+    palette: [0xbcd3e6, 0xd8c2b8, 0xe9d8a6],
+  },
+  {
+    name: 'MERCADO', minX: -180, maxX: 60, minZ: 0, maxZ: 240,
+    palette: [0xe8c9a0, 0xd9a679, 0xe6b8a2],
+  },
+  {
+    name: 'CORAL SHORE', minX: -240, maxX: -180, minZ: -240, maxZ: 0,
+    palette: [0xf5d7d0, 0xcfe0d8, 0xf7ead1],
+  },
+  {
+    name: 'MARINA', minX: -60, maxX: 180, minZ: 180, maxZ: 240,
+    palette: [0xa8c8b8, 0xbcd3e6, 0xf0c987],
+  },
+  {
+    name: 'OLD TOWN', minX: -180, maxX: -60, minZ: -180, maxZ: 180,
+    palette: [0xd9a679, 0x8a6f5c, 0xe9d8a6],
+  },
+];
+
+// Find the district a point sits in, or null outside the city.
+export function districtAt(x, z) {
+  for (const d of DISTRICTS) {
+    if (x >= d.minX && x <= d.maxX && z >= d.minZ && z <= d.maxZ) return d;
+  }
+  return null;
+}
 
 // ------------------------------------------------------------ the crowd
 export const PEDESTRIANS = {
@@ -278,15 +360,32 @@ export const LIGHTING = {
 };
 
 // On foot the camera hangs close; driving pulls it back so more of the
-// road ahead stays in frame.
+// road ahead stays in frame. The driving distance eases between the two
+// factors as the car speeds up: close in when parking, open at speed.
 export const CAMERA = {
   onFootDistance: 7.5,
   onFootHeight: 4.2,
   drivingDistance: 11,
   drivingHeight: 5,
+  closeDistanceFactor: 0.72,
+  farDistanceFactor: 0.28,
   lookAhead: 4,
   fov: 62,
   near: 0.1,
+  cameraFar: 1600,
+};
+
+// Free-roam earnings, shared by the mission manager so the numbers live
+// in one place: how fast a jump must be, how long a jump or a photo spot
+// waits before it pays again, how long a held photo takes, how fast a
+// collected cash pickup comes back, and what a stolen car fences for.
+export const FREE_ROAM = {
+  stuntMinSpeed: 24,
+  stuntCooldownSeconds: 30,
+  photoHoldSeconds: 3,
+  photoCooldownSeconds: 60,
+  pickupRespawnSeconds: 120,
+  carTheftReward: 100,
 };
 
 export const MINIMAP = {

@@ -5,6 +5,11 @@
 // then to look around, and breaking into a panicked run when something
 // scares them — a gunshot, a speeding car, or Leo throwing a punch.
 //
+// New this round: a quarter of the crowd walks in pairs — two friends on
+// the same route, a few steps apart — and one walker in five strolls with
+// a glowing phone in hand, head down, a little slower than everyone else.
+// The street reads as people living their lives, not clones on a rail.
+//
 // The contract other modules rely on (every name and signature stays):
 //   createPedestrianSystem(scene, city, options)
 //     options.count  — how many walkers to have out at once (default 26).
@@ -66,6 +71,9 @@ const DODGE_NOTICE = 2.2; // how much further than a threat's radius a walker no
 const DODGE_SPAN = 0.5; // seconds a sidestep lasts
 const DODGE_PACE = 2.0; // metres per second, stepping sideways
 const DODGE_WAIT = 1.2; // seconds before the same walker dodges again
+const PAIR_ODDS = 0.25; // walkers who arrive with a friend on the same route
+const PHONE_ODDS = 0.2; // walkers glued to a glowing phone, head down
+const PHONE_SLOWDOWN = 0.75; // phone walkers stroll this much slower
 
 // One shared empty threat list, used when update() gets no threats —
 // assigning it costs nothing, unlike building a fresh array per frame.
@@ -177,13 +185,32 @@ function buildFigure(rand) {
     return pivot;
   }
 
+  const armLeft = buildArm(-1);
+  const armRight = buildArm(1);
+
+  // One walker in five is glued to a phone: a small glowing slab held in
+  // the right hand, head tilted down at it, strolling a little slower.
+  let phone = null;
+  if (rand() < PHONE_ODDS) {
+    const screenMat = new THREE.MeshStandardMaterial({
+      color: 0x16222e, emissive: 0x7fb8d9, emissiveIntensity: 1.2, roughness: 0.4,
+    });
+    phone = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.16, 0.02), screenMat);
+    phone.position.set(0, -0.55, 0.08);
+    phone.rotation.x = -0.7;
+    armRight.add(phone);
+    head.rotation.x = 0.35;
+  }
+
   body.scale.setScalar(stature);
   return {
     root: body,
-    armLeft: buildArm(-1),
-    armRight: buildArm(1),
+    head,
+    armLeft,
+    armRight,
     legLeft: buildLeg(-1),
     legRight: buildLeg(1),
+    hasPhone: phone !== null,
   };
 }
 
@@ -251,14 +278,16 @@ export function createPedestrianSystem(scene, city = {}, options = {}) {
     return routes[Math.floor(rand() * routes.length)];
   }
 
-  function spawnWalker() {
+  function spawnWalker(sharedRoute, sharedIndex) {
     if (walkers.length >= CROWD_LIMIT) return null;
     const figure = buildFigure(rand);
-    const route = chooseRoute();
+    const route = sharedRoute || chooseRoute();
     // Spawn at a random spot ALONG a random stretch of the route, not on
     // its listed corners — otherwise every walker would start bunched up.
     const legCount = Math.max(1, route.points.length - 1);
-    const legIndex = Math.floor(rand() * legCount);
+    const legIndex = sharedIndex !== undefined
+      ? Math.min(sharedIndex, legCount - 1)
+      : Math.floor(rand() * legCount);
     const from = route.points[legIndex];
     const to = route.points[legIndex + 1];
     const along = rand();
@@ -269,10 +298,12 @@ export function createPedestrianSystem(scene, city = {}, options = {}) {
 
     const walker = {
       group: figure.root,
+      head: figure.head,
       armLeft: figure.armLeft,
       armRight: figure.armRight,
       legLeft: figure.legLeft,
       legRight: figure.legRight,
+      hasPhone: figure.hasPhone,
       heading: rand() * Math.PI * 2,
       speed: 0,
       walkSpeed: STROLL_SLOW + rand() * (STROLL_FAST - STROLL_SLOW),
@@ -295,9 +326,24 @@ export function createPedestrianSystem(scene, city = {}, options = {}) {
       // Gait variety: every walker swings their arms a little differently.
       swing: 0.45 + rand() * 0.25,
     };
+    if (walker.hasPhone) walker.walkSpeed *= PHONE_SLOWDOWN;
     walker.group.rotation.y = walker.heading;
     walkers.push(walker);
     return walker;
+  }
+
+  // A pair: two friends on the same route, a few steps apart, walking the
+  // same way. The second one shares the first's route and direction.
+  function spawnPair() {
+    const first = spawnWalker();
+    if (!first) return [];
+    const second = spawnWalker(first.route, first.routeIndex);
+    if (!second) return [first];
+    second.routeDir = first.routeDir;
+    second.routeIndex = Math.max(0, first.routeIndex - 1);
+    second.group.position.x = first.group.position.x + 1.2;
+    second.group.position.z = first.group.position.z + 0.8;
+    return [first, second];
   }
 
   // --- panic ---------------------------------------------------------------
@@ -323,8 +369,15 @@ export function createPedestrianSystem(scene, city = {}, options = {}) {
     const wave = Math.sin(walker.walkPhase);
     walker.legLeft.rotation.x = wave * amount;
     walker.legRight.rotation.x = -wave * amount;
-    walker.armLeft.rotation.x = -wave * amount * 0.7;
-    walker.armRight.rotation.x = wave * amount * 0.7;
+    // A phone walker keeps the right arm bent at the phone instead of
+    // swinging it; the left arm swings alone.
+    if (walker.hasPhone) {
+      walker.armRight.rotation.x = -0.9;
+      walker.armLeft.rotation.x = -wave * amount * 0.7;
+    } else {
+      walker.armLeft.rotation.x = -wave * amount * 0.7;
+      walker.armRight.rotation.x = wave * amount * 0.7;
+    }
   }
 
   function settleLimbs(walker, dt) {
@@ -332,7 +385,7 @@ export function createPedestrianSystem(scene, city = {}, options = {}) {
     walker.legLeft.rotation.x *= 1 - ease;
     walker.legRight.rotation.x *= 1 - ease;
     walker.armLeft.rotation.x *= 1 - ease;
-    walker.armRight.rotation.x *= 1 - ease;
+    if (!walker.hasPhone) walker.armRight.rotation.x *= 1 - ease;
   }
 
   // (Separation between fleeing walkers is computed inline in stepWalker,
@@ -510,8 +563,13 @@ export function createPedestrianSystem(scene, city = {}, options = {}) {
     spawn(count = 1) {
       const made = [];
       for (let i = 0; i < count; i += 1) {
-        const walker = spawnWalker();
-        if (walker) made.push(walker);
+        // A quarter of spawns arrive as a pair on the same route.
+        if (rand() < PAIR_ODDS && walkers.length + 1 < CROWD_LIMIT) {
+          made.push(...spawnPair());
+        } else {
+          const walker = spawnWalker();
+          if (walker) made.push(walker);
+        }
       }
       return made;
     },
@@ -533,6 +591,15 @@ export function createPedestrianSystem(scene, city = {}, options = {}) {
         }
       }
       return best;
+    },
+
+    // How many walkers are fleeing right now — the crowd-panic read.
+    getFleeingCount() {
+      let fleeing = 0;
+      for (const walker of walkers) {
+        if (walker.state === 'fleeing') fleeing += 1;
+      }
+      return fleeing;
     },
 
     update(dt, threats = []) {

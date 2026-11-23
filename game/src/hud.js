@@ -1,20 +1,21 @@
-// hud.js — Solmar Bay screen readouts and the round minimap.
+// hud.js — Solmar Bay screen readouts and the round minimap, rebuilt.
 //
 // Everything on screen that is not the 3D world lives here: the cash
-// total, the wanted stars, the clock, the health bar, the current weapon
-// and ammo, the speedometer, the mission objective card, the little
-// banner and toast lines, and the circular minimap. The module is
-// deliberately dumb: main.js hands it a plain snapshot every frame and it
-// paints it. It never moves the player, never changes the wanted level,
-// never spends money.
+// total, the wanted stars, the clock, the health bar, the sprint stamina
+// bar, the current weapon and ammo, the speedometer, the mission
+// objective card, the little banner and toast lines, and the circular
+// minimap. The module is deliberately dumb: main.js hands it a plain
+// snapshot every frame and it paints it. It never moves the player,
+// never changes the wanted level, never spends money.
 //
 // The minimap is a top-down sketch of Marisol Bay on a 2D canvas: the
 // ocean and beach on the west edge, the promenade, the city blocks (green
 // parks, the plaza fountain, the police station, the ferris-wheel
 // landmark, ordinary blocks with building footprints), roads with dashed
 // centrelines, district names, and the live markers on top — Leo as a
-// white arrow, traffic as grey dots, police as blue dots, cash pickups as
-// gold dots, and the mission objective as a pulsing gold diamond.
+// white arrow, traffic as grey dots, police as blue dots, the helicopter
+// as a red dot, cash pickups as gold dots, photo spots as cyan dots, and
+// the mission objective as a pulsing gold diamond.
 
 import { formatMoney, formatClock, formatSpeedKmh, clamp } from './utils.js';
 import { CITY, MINIMAP } from './config.js';
@@ -44,8 +45,10 @@ const PALETTE = {
   player: '#ffffff',
   traffic: '#c8ccd2',
   police: '#4f9dff',
+  heli: '#ff5a4e',
   mission: '#ffd23c',
   pickup: '#ffcf5e',
+  photo: '#4fd8e8',
   ring: '#e8e4d8',
 };
 
@@ -55,6 +58,8 @@ const DISTRICTS = [
   { x: 60, z: -60, name: 'DOWNTOWN' },
   { x: -120, z: 60, name: 'MERCADO' },
   { x: -180, z: -180, name: 'CORAL SHORE' },
+  { x: 60, z: 210, name: 'MARINA' },
+  { x: -120, z: 0, name: 'OLD TOWN' },
 ];
 // The ferris wheel landmark, in world coordinates.
 const WHEEL = { x: 0, z: -215 };
@@ -263,18 +268,24 @@ function paintMarkers(g, map, pulse) {
     ctx.arc(toX(x), toY(z), r, 0, Math.PI * 2);
     ctx.fill();
   };
-  // Cash pickups first (under everything else), then traffic with a dark
-  // outline so the dots read against the pale roads.
+  const ringedDot = (x, z, r, color, ringColor) => {
+    dot(x, z, r, color);
+    ctx.strokeStyle = ringColor;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(toX(x), toY(z), r, 0, Math.PI * 2);
+    ctx.stroke();
+  };
+  // Cash pickups first (under everything else), then photo spots, then
+  // traffic with a dark outline so the dots read against the pale roads.
   for (const p of map.pickups || []) {
     if (p.available) dot(p.x, p.z, 2.5, PALETTE.pickup);
   }
+  for (const spot of map.photoSpots || []) {
+    if (spot.ready) dot(spot.x, spot.z, 2, PALETTE.photo);
+  }
   for (const car of map.traffic || []) {
-    dot(car.x, car.z, 2.5, PALETTE.traffic);
-    ctx.strokeStyle = INK;
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.arc(toX(car.x), toY(car.z), 2.5, 0, Math.PI * 2);
-    ctx.stroke();
+    ringedDot(car.x, car.z, 2.5, PALETTE.traffic, INK);
   }
   // Mission marker: a pulsing gold diamond with a white outline and a
   // faint outer ring, so the objective is unmissable.
@@ -299,14 +310,14 @@ function paintMarkers(g, map, pulse) {
     ctx.fill();
     ctx.stroke();
   }
-  // Police blips on top of traffic so a chase reads at a glance.
+  // Police blips on top of traffic so a chase reads at a glance. The
+  // helicopter is a bigger red dot — the one unit that never leaves.
   for (const unit of map.police || []) {
-    dot(unit.x, unit.z, 3.5, PALETTE.police);
-    ctx.strokeStyle = '#ffffff';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.arc(toX(unit.x), toY(unit.z), 3.5, 0, Math.PI * 2);
-    ctx.stroke();
+    if (unit.kind === 'heli') {
+      ringedDot(unit.x, unit.z, 4.5, PALETTE.heli, '#ffffff');
+    } else {
+      ringedDot(unit.x, unit.z, 3.5, PALETTE.police, '#ffffff');
+    }
   }
 }
 
@@ -350,6 +361,8 @@ export class SolmarHud {
     this.wantedEl = byId('hud-wanted');
     this.clockEl = byId('hud-clock');
     this.healthBarEl = byId('hud-health-bar');
+    this.staminaBarEl = byId('hud-stamina-bar');
+    this.staminaWrapEl = byId('hud-stamina-bar-wrap');
     this.weaponEl = byId('hud-weapon');
     this.speedEl = byId('hud-speed');
     this.objectiveTitleEl = byId('hud-objective-title');
@@ -380,9 +393,9 @@ export class SolmarHud {
   }
 
   // One frame of HUD painting. `snap` is a plain object from main.js:
-  // { health, cash, stars, speedMps, weaponName, ammoInMag, ammoReserve,
-  //   reloading, clockHour, clockMinute, objective {title,text,step,steps,
-  //   dialogue}, prompt, driving, aiming }
+  // { health, stamina, cash, stars, speedMps, weaponName, ammoInMag,
+  //   ammoReserve, reloading, clockHour, clockMinute, objective
+  //   {title,text,step,steps,dialogue}, prompt, driving, aiming }
   update(snap, dt) {
     if (!snap) return;
     const step = dt || 0;
@@ -390,6 +403,14 @@ export class SolmarHud {
       const hp = clamp(snap.health || 0, 0, 100);
       this.healthBarEl.style.width = hp + '%';
       this.healthBarEl.classList.toggle('low', hp <= 30);
+    }
+    if (this.staminaBarEl) {
+      const stamina = clamp(snap.stamina ?? 100, 0, 100);
+      this.staminaBarEl.style.width = stamina + '%';
+      this.staminaBarEl.classList.toggle('low', stamina <= 25);
+      if (this.staminaWrapEl) {
+        this.staminaWrapEl.setAttribute('aria-valuenow', String(Math.round(stamina)));
+      }
     }
     if (this.cashEl && snap.cash !== this.lastCash) {
       this.cashEl.textContent = formatMoney(snap.cash || 0);
@@ -403,9 +424,10 @@ export class SolmarHud {
       this.clockEl.textContent = formatClock(snap.clockHour || 17, snap.clockMinute || 40);
     }
     if (this.weaponEl) {
-      const name = snap.weaponName === 'pistol' ? 'Pistol' : 'Fists';
+      const name = snap.weaponName === 'pistol' ? 'Pistol'
+        : snap.weaponName === 'shotgun' ? 'Shotgun' : 'Fists';
       let ammo = '';
-      if (snap.weaponName === 'pistol') {
+      if (snap.weaponName === 'pistol' || snap.weaponName === 'shotgun') {
         ammo = ` <span class="ammo">${snap.ammoInMag} / ${snap.ammoReserve}</span>`;
         if (snap.reloading) ammo += ' — reloading…';
       }
@@ -468,7 +490,7 @@ export class SolmarHud {
   // `map` is a plain object from main.js:
   // { playerX, playerZ, playerHeading, driving, traffic: [{x,z}],
   //   police: [{x,z,kind}], marker: {x,z,active}, pickups: [{x,z,available}],
-  //   roads: [{axis, at, min, max}], worldRadius }
+  //   photoSpots: [{x,z,ready}], roads: [{axis, at, min, max}], worldRadius }
   drawMinimap(map, dt) {
     const ctx = this.minimapCtx;
     const canvas = this.minimapEl;
